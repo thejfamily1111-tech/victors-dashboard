@@ -24,14 +24,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Hide Streamlit header, toolbar, and footer
+# Hide Streamlit header, toolbar, and decoration bar
 st.markdown(
     """
     <style>
-    [data-testid="stToolbar"] {visibility: hidden; display: none !important;}
-    header {visibility: hidden !important;}
-    #MainMenu {visibility: hidden !important;}
-    footer {visibility: hidden !important;}
+    [data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
+    [data-testid="stDecoration"] {visibility: hidden !important; display: none !important;}
+    [data-testid="stStatusWidget"] {visibility: hidden !important; display: none !important;}
+    header[data-testid="stHeader"] {visibility: hidden !important; display: none !important;}
+    #MainMenu {visibility: hidden !important; display: none !important;}
+    footer {visibility: hidden !important; display: none !important;}
+    .stAppToolbar {visibility: hidden !important; display: none !important;}
     </style>
     """,
     unsafe_allow_html=True,
