@@ -15,12 +15,28 @@ import market_barometer as mb
 import economic_calendar as ec
 import fundamental_engine as fe
 
+import streamlit as st
+
 st.set_page_config(
     page_title="Victor's Dashboard",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Hide Streamlit header, toolbar, and footer
+st.markdown(
+    """
+    <style>
+    [data-testid="stToolbar"] {visibility: hidden; display: none !important;}
+    header {visibility: hidden !important;}
+    #MainMenu {visibility: hidden !important;}
+    footer {visibility: hidden !important;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # -------------------------------------------------------------
 # ACCESS GATE (PIN: Tactical)
