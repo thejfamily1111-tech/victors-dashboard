@@ -3,3 +3,14 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+*.docx
+progress save 9-19-26/
+buy_tesla.py
+market_check.py
+market_intelligence.py
+research_momentum_bot.py
+test_account.py
+test_crypto.py
+test_order.py
+trader_bot.py
+watchlist_scanner.py
