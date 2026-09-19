@@ -17,6 +17,8 @@ import fundamental_engine as fe
 
 import streamlit as st
 
+from holly_engine import run_holly_overnight_optimization
+
 st.set_page_config(
     page_title="Victor's Dashboard",
     page_icon="⚡",
@@ -110,6 +112,22 @@ tab_analysis, tab_engine, tab_calendar = st.tabs([
 # TAB 1: DEEP-DIVE TICKER ANALYSIS
 # =============================================================
 with tab_analysis:
+
+    # --- Holly AI Quantitative Engine ---
+    with st.expander("⚡ Holly AI Active Strategies (Overnight Quantitative Optimization)"):
+        st.caption("Simulates intraday setups across momentum universe and filters by >60% Win Rate & >1.5 Profit Factor.")
+        if st.button("Run Quantitative Strategy Screen"):
+            with st.spinner("Simulating intraday setups & testing parameter gates..."):
+                universe = ["SPY", "QQQ", "NVDA", "AAPL", "META", "TSLA"]
+                qualified = run_holly_overnight_optimization(universe)
+                
+                if not qualified.empty:
+                    st.dataframe(
+                        qualified[["Ticker", "Strategy", "Stop (xATR)", "Target (xATR)", "Trades", "Win Rate (%)", "Profit Factor", "Expectancy ($)"]],
+                        use_container_width=True
+                    )
+                else:
+                    st.info("Market conditions did not yield setups meeting the Holly statistical gate today.")
     st.subheader(f"⚡ Technical Confluence: {selected_ticker}")
     
     try:
