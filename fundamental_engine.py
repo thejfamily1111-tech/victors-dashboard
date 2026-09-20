@@ -1,57 +1,136 @@
 from datetime import datetime
 import numpy as np
 import pandas as pd
+import streamlit as st
 import yfinance as yf
 
 
+@st.cache_data(ttl=900)
 def get_company_fundamentals(ticker_symbol: str):
   tk = yf.Ticker(ticker_symbol)
-  info = tk.info or {}
 
-  bs = tk.balance_sheet
-  cf = tk.cashflow
-  inc = tk.financials
+  # Fetch info safely
+  try:
+    info = tk.info or {}
+  except Exception:
+    info = {}
 
-  # 1. Balance Sheet & Liquidity Core
-  total_cash = float(info.get("totalCash", 0) or 0)
-  total_debt = float(info.get("totalDebt", 0) or 0)
-  net_cash = total_cash - total_debt
-  free_cash_flow = float(info.get("freeCashflow", 0) or 0)
-  total_revenue = float(info.get("totalRevenue", 0) or 0)
-  net_income = float(info.get("netIncomeToCommon", 0) or 0)
-  current_ratio = float(info.get("currentRatio", 0.0) or 0.0)
-  shares_out = float(info.get("sharesOutstanding", 1) or 1)
-  current_price = float(
-      info.get("currentPrice", info.get("regularMarketPrice", 0.0)) or 0.0
+  # Fallback to fast_info for market price and shares if info is throttled
+  fast = getattr(tk, "fast_info", {})
+  current_price = (
+      float(info.get("currentPrice") or info.get("regularMarketPrice") or 0.0)
+      if info
+      else 0.0
   )
-  trailing_pe = float(info.get("trailingPE", 0.0) or 0.0)
-  forward_pe = float(info.get("forwardPE", 0.0) or 0.0)
-  profit_margin = float(info.get("profitMargins", 0.0) or 0.0)
+  if current_price == 0.0 and hasattr(fast, "last_price"):
+    current_price = float(fast.last_price or 0.0)
+
+  shares_out = float(info.get("sharesOutstanding") or 1) if info else 1.0
+  if shares_out <= 1.0 and hasattr(fast, "shares"):
+    shares_out = float(fast.shares or 1.0)
+
+  # Pull Financial Statements
+  try:
+    bs = tk.balance_sheet
+  except Exception:
+    bs = pd.DataFrame()
+
+  try:
+    inc = tk.financials
+  except Exception:
+    inc = pd.DataFrame()
+
+  try:
+    cf = tk.cashflow
+  except Exception:
+    cf = pd.DataFrame()
+
+  # Total Revenue Fallback
+  total_revenue = float(info.get("totalRevenue") or 0.0) if info else 0.0
+  if total_revenue == 0.0 and not inc.empty:
+    for rev_key in ["Total Revenue", "Operating Revenue"]:
+      if rev_key in inc.index:
+        total_revenue = float(inc.loc[rev_key].dropna().iloc[0])
+        break
+
+  # Net Income Fallback
+  net_income = (
+      float(info.get("netIncomeToCommon") or 0.0) if info else 0.0
+  )
+  if net_income == 0.0 and not inc.empty:
+    if "Net Income" in inc.index:
+      net_income = float(inc.loc["Net Income"].dropna().iloc[0])
+
+  # Free Cash Flow Fallback
+  free_cash_flow = (
+      float(info.get("freeCashflow") or 0.0) if info else 0.0
+  )
+  if free_cash_flow == 0.0 and not cf.empty:
+    if "Free Cash Flow" in cf.index:
+      free_cash_flow = float(cf.loc["Free Cash Flow"].dropna().iloc[0])
+
+  # Balance sheet cash and debt
+  total_cash = float(info.get("totalCash") or 0.0) if info else 0.0
+  total_debt = float(info.get("totalDebt") or 0.0) if info else 0.0
+  if total_cash == 0.0 and not bs.empty:
+    for c_key in [
+        "Cash And Cash Equivalents",
+        "Cash Cash Equivalents And Short Term Investments",
+    ]:
+      if c_key in bs.index:
+        total_cash = float(bs.loc[c_key].dropna().iloc[0])
+        break
+
+  if total_debt == 0.0 and not bs.empty:
+    for d_key in ["Total Debt", "Long Term Debt"]:
+      if d_key in bs.index:
+        total_debt = float(bs.loc[d_key].dropna().iloc[0])
+        break
+
+  net_cash = total_cash - total_debt
+  current_ratio = float(info.get("currentRatio") or 0.0) if info else 0.0
+  trailing_pe = float(info.get("trailingPE") or 0.0) if info else 0.0
+  forward_pe = float(info.get("forwardPE") or 0.0) if info else 0.0
+
+  profit_margin = (
+      float(info.get("profitMargins") or 0.0) if info else 0.0
+  )
+  if profit_margin == 0.0 and total_revenue > 0:
+    profit_margin = net_income / total_revenue
+
   fcf_margin = (
       (free_cash_flow / total_revenue) if total_revenue > 0 else 0.0
   )
-  rev_growth_1y = float(info.get("revenueGrowth", 0.0) or 0.0)
+  rev_growth_1y = (
+      float(info.get("revenueGrowth") or 0.0) if info else 0.0
+  )
 
-  # 2. 12-Month Wall Street Market Forecast
-  target_mean = float(
-      info.get(
-          "targetMeanPrice",
-          info.get("targetMedianPrice", current_price),
+  # 12M Analyst Forecast
+  target_mean = (
+      float(
+          info.get("targetMeanPrice")
+          or info.get("targetMedianPrice")
+          or current_price
       )
-      or current_price
+      if info
+      else current_price
   )
-  target_high = float(
-      info.get("targetHighPrice", target_mean * 1.15) or (target_mean * 1.15)
+  target_high = (
+      float(info.get("targetHighPrice") or target_mean * 1.15)
+      if info
+      else target_mean * 1.15
   )
-  target_low = float(
-      info.get("targetLowPrice", target_mean * 0.85) or (target_mean * 0.85)
+  target_low = (
+      float(info.get("targetLowPrice") or target_mean * 0.85)
+      if info
+      else target_mean * 0.85
   )
   rec_key = (
-      str(info.get("recommendationKey", "N/A") or "N/A")
+      str(info.get("recommendationKey") or "N/A")
       .upper()
       .replace("_", " ")
   )
-  num_analysts = int(info.get("numberOfAnalystOpinions", 0) or 0)
+  num_analysts = int(info.get("numberOfAnalystOpinions") or 0)
 
   upside_12m = (
       ((target_mean - current_price) / current_price * 100.0)
@@ -68,19 +147,21 @@ def get_company_fundamentals(ticker_symbol: str):
       "analysts_count": num_analysts,
   }
 
-  # 3. ROIC Calculation
+  # ROIC Calculation
   try:
     ebit = (
-        inc.loc["EBIT"].iloc[0]
-        if "EBIT" in inc.index
+        inc.loc["EBIT"].dropna().iloc[0]
+        if ("EBIT" in inc.index and not inc.empty)
         else net_income * 1.15
     )
     assets = (
-        bs.loc["Total Assets"].iloc[0] if "Total Assets" in bs.index else 1
+        bs.loc["Total Assets"].dropna().iloc[0]
+        if ("Total Assets" in bs.index and not bs.empty)
+        else 1
     )
     curr_liab = (
-        bs.loc["Current Liabilities"].iloc[0]
-        if "Current Liabilities" in bs.index
+        bs.loc["Current Liabilities"].dropna().iloc[0]
+        if ("Current Liabilities" in bs.index and not bs.empty)
         else 0
     )
     invested_cap = max(assets - curr_liab, 1)
@@ -88,66 +169,57 @@ def get_company_fundamentals(ticker_symbol: str):
   except Exception:
     roic = 0.10
 
-  # 4. 8-Pillars Evaluation
-  p1_pe = 0 < trailing_pe < 22.5
-  p2_roic = roic >= 0.09
-  p3_rev_growth = rev_growth_1y > 0
-  p4_net_income = net_income > 0
-  p5_fcf_pos = free_cash_flow > 0
-  p6_debt_coverage = (
-      (total_debt < (free_cash_flow * 5)) if free_cash_flow > 0 else False
-  )
-  p7_curr_ratio = current_ratio >= 1.2
-  p8_margin = profit_margin > 0.10
-
+  # 8-Pillars Evaluation
   pillars = [
       {
           "Pillar": "1. P/E Under 22.5",
           "Criteria": "< 22.5",
           "Current Value": f"{trailing_pe:.1f}x",
-          "Pass": p1_pe,
+          "Pass": 0 < trailing_pe < 22.5,
       },
       {
           "Pillar": "2. ROIC > 9%",
           "Criteria": "≥ 9.0%",
           "Current Value": f"{roic*100:.1f}%",
-          "Pass": p2_roic,
+          "Pass": roic >= 0.09,
       },
       {
           "Pillar": "3. Revenue Growth (1Y/5Y)",
           "Criteria": "Positive Growth",
           "Current Value": f"{rev_growth_1y*100:+.1f}%",
-          "Pass": p3_rev_growth,
+          "Pass": rev_growth_1y > 0,
       },
       {
           "Pillar": "4. Net Income Profitable",
           "Criteria": "> $0",
           "Current Value": f"${net_income/1e9:.2f} B",
-          "Pass": p4_net_income,
+          "Pass": net_income > 0,
       },
       {
           "Pillar": "5. Free Cash Flow Positive",
           "Criteria": "> $0",
           "Current Value": f"${free_cash_flow/1e9:.2f} B",
-          "Pass": p5_fcf_pos,
+          "Pass": free_cash_flow > 0,
       },
       {
           "Pillar": "6. Debt Covered by 5Y FCF",
           "Criteria": "Debt < 5x FCF",
           "Current Value": f"${total_debt/1e9:.2f}B Debt",
-          "Pass": p6_debt_coverage,
+          "Pass": (total_debt < (free_cash_flow * 5))
+          if free_cash_flow > 0
+          else False,
       },
       {
           "Pillar": "7. Current Ratio ≥ 1.2",
           "Criteria": "≥ 1.2",
           "Current Value": f"{current_ratio:.2f}",
-          "Pass": p7_curr_ratio,
+          "Pass": current_ratio >= 1.2,
       },
       {
           "Pillar": "8. Profit Margin ≥ 10%",
           "Criteria": "≥ 10.0%",
           "Current Value": f"{profit_margin*100:.1f}%",
-          "Pass": p8_margin,
+          "Pass": profit_margin >= 0.10,
       },
   ]
 
@@ -174,24 +246,18 @@ def get_company_fundamentals(ticker_symbol: str):
   }
 
 
-def calculate_fair_values(fund: dict, assumptions: dict):
-  years = 5
-  current_rev = max(float(fund.get("total_revenue", 1)), 1.0)
-  shares = max(float(fund.get("shares_out", 1)), 1.0)
-  spot = float(fund.get("current_price", 0.0))
+def calculate_fair_values(fund: dict, assumptions: dict, years: int = 5):
+  years = max(int(years), 1)
+  current_rev = max(float(fund.get("total_revenue") or 0.0), 1.0)
+  shares = max(float(fund.get("shares_out") or 1.0), 1.0)
+  spot = float(fund.get("current_price") or 0.0)
 
   results = {}
   for case in ["Low", "Mid", "High"]:
-    raw_g = assumptions[case]["rev_growth"]
-    g = raw_g / 100.0 if abs(raw_g) > 1.0 else raw_g
-
-    raw_pm = assumptions[case]["profit_margin"]
-    pm = raw_pm / 100.0 if abs(raw_pm) > 1.0 else raw_pm
-
+    g = float(assumptions[case]["rev_growth"]) / 100.0
+    pm = float(assumptions[case]["profit_margin"]) / 100.0
     pe = max(float(assumptions[case]["target_pe"]), 1.0)
-
-    raw_ret = assumptions[case]["desired_return"]
-    discount_rate = raw_ret / 100.0 if abs(raw_ret) > 1.0 else raw_ret
+    discount_rate = float(assumptions[case]["desired_return"]) / 100.0
 
     future_rev = current_rev * ((1.0 + max(g, -0.90)) ** years)
     future_earnings = future_rev * max(pm, 0.001)
@@ -205,7 +271,7 @@ def calculate_fair_values(fund: dict, assumptions: dict):
     margin_of_safety_pct = (
         ((fair_price_today - spot) / spot * 100.0) if spot > 0 else 0.0
     )
-    projected_5y_return_pct = (
+    projected_return_pct = (
         ((future_stock_price - spot) / spot * 100.0) if spot > 0 else 0.0
     )
 
@@ -213,7 +279,7 @@ def calculate_fair_values(fund: dict, assumptions: dict):
         "future_price": round(future_stock_price, 2),
         "fair_value_today": round(fair_price_today, 2),
         "upside_vs_fair": round(margin_of_safety_pct, 1),
-        "total_5y_upside": round(projected_5y_return_pct, 1),
+        "total_upside": round(projected_return_pct, 1),
     }
 
   return results
