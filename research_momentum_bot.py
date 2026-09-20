@@ -28,11 +28,15 @@ for path in [
   if os.path.exists(path):
     load_dotenv(path)
 
-API_KEY = os.getenv("ALPACA_API_KEY")
-SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+API_KEY = os.getenv("APCA_API_KEY_ID") or os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("APCA_API_SECRET_KEY") or os.getenv("ALPACA_SECRET_KEY")
 
-trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-data_client = OptionHistoricalDataClient(API_KEY, SECRET_KEY)
+if API_KEY and SECRET_KEY:
+    trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+    data_client = OptionHistoricalDataClient(API_KEY, SECRET_KEY)
+else:
+    trading_client = None
+    data_client = None
 
 # 2. Institutional Research Parameters
 UNIVERSE = ["SPY", "QQQ", "NVDA", "AAPL", "AMD", "AMZN"]
