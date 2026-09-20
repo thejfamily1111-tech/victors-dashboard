@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 
+# Load environment credentials
 for path in [
     "/Users/vic/Desktop/Coding/.env",
     "/Users/vic/trading_bot/.env",
@@ -15,6 +16,7 @@ for path in [
     if os.path.exists(path):
         load_dotenv(path)
 
+# Core trading modules
 import alpha_engine as ae
 import economic_calendar as ec
 import fundamental_engine as fe
@@ -23,15 +25,22 @@ import market_barometer as mb
 import option_engine as oe
 import research_momentum_bot as rmb
 
+# Autonomous AI Desk Manager
+try:
+    from ai_manager import AITradingManager
+    vic_manager = AITradingManager()
+except ImportError:
+    vic_manager = None
+
 st.set_page_config(
-    page_title="Victor's Dashboard",
+    page_title="Victor's Dashboard | VIC AI",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # -------------------------------------------------------------
-# STYLING & HORIZONTAL SCROLL CONTAINER
+# STYLING & APEX DARK THEME
 # -------------------------------------------------------------
 st.markdown(
     """
@@ -82,6 +91,31 @@ st.markdown(
     .status-live { color: #00bc8c; font-weight: bold; }
     .status-warn { color: #f39c12; font-weight: bold; }
     
+    .vic-card {
+        background: linear-gradient(135deg, #131722 0%, #1a2332 100%);
+        border: 1px solid #2d3748;
+        border-left: 4px solid #00bc8c;
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin-bottom: 20px;
+    }
+    .vic-title {
+        font-size: 0.95rem;
+        font-weight: 800;
+        letter-spacing: 0.5px;
+        color: #ffffff;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .vic-text {
+        font-family: 'SF Mono', Monaco, Consolas, monospace;
+        font-size: 0.82rem;
+        color: #cbd5e1;
+        margin-top: 6px;
+        line-height: 1.45;
+    }
+
     .unit-tag {
         font-size: 0.72rem;
         color: #8b949e;
@@ -148,7 +182,7 @@ with st.sidebar:
         """
         <div style="text-align: center; margin-top: -10px; margin-bottom: 20px;">
             <div style="font-size: 1.3rem; font-weight: 800; letter-spacing: 1px; color: #ffffff;">VICTOR'S DASHBOARD</div>
-            <div style="font-size: 0.75rem; color: #f39c12; letter-spacing: 1.2px; font-weight: 600;">APEX INTELLIGENCE TERMINAL</div>
+            <div style="font-size: 0.75rem; color: #f39c12; letter-spacing: 1.2px; font-weight: 600;">SUPERVISED BY VIC AI</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -158,6 +192,12 @@ with st.sidebar:
     unit_risk_dollars = st.number_input("Unit Risk Budget (1R)", value=250.0, step=25.0)
     max_portfolio_risk = st.slider("Max Open Risk %", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
 
+    st.markdown("### Autonomous Officer (VIC)")
+    st.caption("Active Mode: **Real-Time Macro Veto & ORB Gatekeeper**")
+    if st.button("Re-evaluate Macro Regime", use_container_width=True):
+        st.session_state["vic_briefing_cache"] = None
+        st.rerun()
+
     if st.button("Lock Terminal", use_container_width=True):
         st.session_state.authenticated = False
         st.rerun()
@@ -166,7 +206,7 @@ with st.sidebar:
 # TOP TELEMETRY: SYSTEM HEALTH & RISK COCKPIT
 # -------------------------------------------------------------
 st.title("⚡ Victor's Dashboard")
-st.caption("Apex Quantitative Intelligence Terminal | Live Confluence & Valuation Engine")
+st.caption("Apex Quantitative Intelligence Terminal | Supervised by VIC (Autonomous Risk Officer)")
 
 now_et = datetime.now()
 is_weekend = now_et.weekday() >= 5
@@ -180,13 +220,25 @@ st.markdown(
              Last Scan: <code>{now_et.strftime('%H:%M:%S ET')}</code> &nbsp;|&nbsp; 
              Feed: <span class="status-live">● Healthy</span></div>
         <div>Broker: <b>ALPACA PAPER</b> &nbsp;|&nbsp; 
-             Risk Loop: <span class="status-live">● ACTIVE</span> &nbsp;|&nbsp; 
+             VIC AI Risk Loop: <span class="status-live">● ACTIVE</span> &nbsp;|&nbsp; 
              Open Risk: <b>0.00%</b> &nbsp;|&nbsp; 
-             Daily Loss Limit: <b>-2.00%</b></div>
+             Daily Loss Limit: <b>-{max_portfolio_risk:.2f}%</b></div>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+# -------------------------------------------------------------
+# VIC AI EXECUTIVE DESK BRIEFING
+# -------------------------------------------------------------
+if vic_manager:
+    if "vic_briefing_cache" not in st.session_state or st.session_state["vic_briefing_cache"] is None:
+        st.session_state["vic_briefing_cache"] = vic_manager.generate_premarket_briefing()
+    
+    vic_briefing = st.session_state["vic_briefing_cache"]
+    
+    with st.expander("🏛️ VIC AI Desk Manager Briefing & Macro Bias", expanded=True):
+        st.code(vic_briefing, language="markdown")
 
 search_col1, search_col2 = st.columns([2, 2])
 with search_col1:
@@ -208,7 +260,7 @@ tab_analysis, tab_engine, tab_calendar = st.tabs([
 with tab_analysis:
 
     with st.expander("⚡ Hero AI Active Strategies (Decision-Grade Matrix)", expanded=True):
-        st.caption("Auditable execution matrix with explicit Option Type, dynamic order state, and full horizontal scroll.")
+        st.caption("Auditable execution matrix supervised by VIC: Explicit Option Type, dynamic order state, and full horizontal scroll.")
         
         if st.button("Run Hero AI Strategy Screen", key="btn_hero_screen", use_container_width=True):
             with st.spinner("Screening factors, sector clusters, and option order books..."):
@@ -285,10 +337,16 @@ with tab_analysis:
                         order_state = "—"
                         reasons.append("Inside 30m ORB" if (spot <= orb_h and spot >= orb_l) else "EMA flat/chop")
                     else:
+                        # VIC AI Gatekeeper Check
+                        direction_str = "CALL" if is_bullish else "PUT"
+                        vic_verdict = vic_manager.audit_trade_candidate(ticker, direction_str, alpha_score) if vic_manager else {"approved": True, "reason": "Bypassed"}
+
                         alpha_pass = alpha_score >= 70.0
                         exec_pass = exec_score >= 65.0
                         regime_pass = regime_score >= 65.0 if is_bullish else regime_score <= 55.0
 
+                        if not vic_verdict["approved"]:
+                            reasons.append(f"VIC Veto: {vic_verdict['reason']}")
                         if not alpha_pass:
                             reasons.append(f"Alpha ({alpha_score:.0f}) low")
                         if not exec_pass:
@@ -296,7 +354,7 @@ with tab_analysis:
                         if not regime_pass:
                             reasons.append(f"Regime ({regime_score:.0f}) drag")
 
-                        if alpha_pass and exec_pass and regime_pass:
+                        if alpha_pass and exec_pass and regime_pass and vic_verdict["approved"]:
                             if cluster in approved_clusters and cluster not in ["Macro", "General"]:
                                 hero_decision = "⚠️ CONDITIONAL"
                                 order_state = "⏸ BLOCKED"
@@ -306,7 +364,7 @@ with tab_analysis:
                                 order_state = "🟡 ARMED"
                                 approved_clusters.add(cluster)
                                 reasons.append("Confluence aligned")
-                        elif alpha_score >= 65.0 and exec_score >= 60.0:
+                        elif alpha_score >= 65.0 and exec_score >= 60.0 and vic_verdict["approved"]:
                             hero_decision = "⚠️ CONDITIONAL"
                             order_state = "⏳ WAITING"
                         else:
@@ -390,7 +448,7 @@ with tab_analysis:
             st.write(f"• **Volume / Open Interest:** `{opt_info.get('volume', 0):,}` / `{opt_info.get('open_interest', 0):,}`")
             st.write(f"• **Implied Volatility:** `{opt_info.get('iv', 0.0):.1f}%`")
 
-    # Charting
+    # Interactive Price & Trend Chart
     try:
         df = yf.download(selected_ticker, period=f"{lookback_days}d", interval="1d", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -596,7 +654,7 @@ with tab_calendar:
 st.markdown(
     """
     <div class="legal-disclaimer">
-        <strong>Regulatory & Risk Disclosure:</strong> Victor Terminal and Hero AI provide quantitative market analysis, backtesting frameworks, and valuation models strictly for informational and educational purposes. Nothing contained herein constitutes financial, investment, legal, or tax advice. Trading equities, options, and futures involves substantial risk of loss and is not suitable for every investor. Past performance and simulated backtest results do not guarantee future returns.
+        <strong>Regulatory & Risk Disclosure:</strong> Victor Terminal and VIC AI provide quantitative market analysis, backtesting frameworks, and valuation models strictly for informational and educational purposes. Nothing contained herein constitutes financial, investment, legal, or tax advice. Trading equities, options, and futures involves substantial risk of loss and is not suitable for every investor. Past performance and simulated backtest results do not guarantee future returns.
     </div>
     """,
     unsafe_allow_html=True,
