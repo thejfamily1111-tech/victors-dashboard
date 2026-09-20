@@ -14,12 +14,9 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import ContractType, OrderSide, TimeInForce
 from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest
 
-# Quantitative & Logging Layers
-import alpha_engine as ae
-import option_engine as oe
-import research_logger as rl
-
-# 1. Environment & API Clients
+# -------------------------------------------------------------
+# 1. Environment & API Clients (Loaded First)
+# -------------------------------------------------------------
 for path in [
     "/Users/vic/Desktop/Coding/.env",
     "/Users/vic/trading_bot/.env",
@@ -38,13 +35,28 @@ else:
     trading_client = None
     data_client = None
 
-# 2. Institutional Research Parameters
+# -------------------------------------------------------------
+# Quantitative, Logging & AI Executive Layers
+# -------------------------------------------------------------
+import alpha_engine as ae
+import option_engine as oe
+import research_logger as rl
+
+try:
+    from ai_manager import AITradingManager
+    vic_officer = AITradingManager()
+except ImportError:
+    vic_officer = None
+
+# -------------------------------------------------------------
+# 2. Institutional Research & Risk Parameters
+# -------------------------------------------------------------
 UNIVERSE = ["SPY", "QQQ", "NVDA", "AAPL", "AMD", "AMZN"]
 RISK_PER_TRADE_PERCENT = 0.005  # 0.5% max equity risk per trade
 MAX_CONCURRENT_POSITIONS = 3
-TARGET_DELTA = 0.65  # Target ~0.65 Delta (Slightly ITM)
-DELTA_TOLERANCE = 0.10  # Accept Delta between 0.55 and 0.75
-MAX_RELATIVE_SPREAD = 0.06  # Max 6% spread vs midpoint
+TARGET_DELTA = 0.65            # Target ~0.65 Delta (Slightly ITM)
+DELTA_TOLERANCE = 0.10         # Accept Delta between 0.55 and 0.75
+MAX_RELATIVE_SPREAD = 0.06     # Max 6% spread vs midpoint
 MIN_DTE = 1
 MAX_DTE = 7
 FLATTEN_TIME_STR = "15:45:00"
@@ -134,7 +146,7 @@ def fetch_underlying_features(symbol: str):
 def select_research_contract(
     symbol: str, spot: float, contract_type: ContractType
 ):
-    """Selects active contract matching 0.60-0.75 Delta with low spread."""
+    """Selects active contract matching 0.60-0.75 Delta with low relative spread."""
     if not trading_client or not data_client:
         return None
 
@@ -220,7 +232,7 @@ def check_orb_revalidation(
 ) -> dict:
     """
     Evaluates an ARMED setup at each 15-minute bar close.
-    Disarms stale trades or false breakouts that slipped back inside the range.
+    Disarms stale trades or false breakouts that slip back inside the range.
     """
     if setup_state.get("status") != "ARMED":
         return setup_state
@@ -251,7 +263,9 @@ def check_orb_revalidation(
     # 2. Time-to-Live Expired (stalled for 2 bars / 30m without fill)
     if bars_elapsed >= max_wait_bars:
         setup_state["status"] = "EXPIRED"
-        setup_state["audit_reason"] = f"TTL Expired: Unfilled after {bars_elapsed} bars (30m window)"
+        setup_state["audit_reason"] = (
+            f"TTL Expired: Unfilled after {bars_elapsed} bars (30m window)"
+        )
         return setup_state
 
     return setup_state
@@ -366,7 +380,7 @@ def run_continuous_risk_loop():
 
 
 def scan_alpha_signals():
-    """Evaluates 30m ORB signals for both CALL and PUT setups."""
+    """Evaluates 30m ORB signals vetted by VIC AI for CALL and PUT setups."""
     now = datetime.now()
     if now.hour == 9 and now.minute < 30:
         return
@@ -419,6 +433,15 @@ def scan_alpha_signals():
 
         direction = "CALL" if is_bullish else "PUT"
         contract_type = ContractType.CALL if is_bullish else ContractType.PUT
+
+        # -----------------------------------------------------
+        # 🏛️ VIC AI Risk Gatekeeper Audit (Pre-Execution Gate)
+        # -----------------------------------------------------
+        if vic_officer:
+            vic_audit = vic_officer.audit_trade_candidate(ticker, direction, alpha_score)
+            if not vic_audit.get("approved", True):
+                print(f"🛑 [VIC AI VETO] {ticker} {direction}: {vic_audit.get('reason')}")
+                continue
 
         match = select_research_contract(ticker, spot, contract_type)
         if not match:
@@ -515,6 +538,7 @@ def scan_alpha_signals():
 
 if __name__ == "__main__":
     print("🤖 Research Momentum Options Bot Active (Production Shadow Mode).")
+    print("🏛️ Autonomous Risk & Operations: VIC AI Gatekeeper Engaged.")
 
     while True:
         try:
