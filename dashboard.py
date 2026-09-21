@@ -1,5 +1,5 @@
-import os
 from datetime import datetime
+import os
 from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
@@ -28,6 +28,7 @@ import research_momentum_bot as rmb
 # Autonomous AI Desk Manager
 try:
     from ai_manager import AITradingManager
+
     vic_manager = AITradingManager()
 except ImportError:
     vic_manager = None
@@ -88,32 +89,38 @@ st.markdown(
         flex-wrap: wrap;
         gap: 10px;
     }
-    .status-live { color: #00bc8c; font-weight: bold; }
-    .status-warn { color: #f39c12; font-weight: bold; }
+    .status-live { color: #00e676; font-weight: bold; }
+    .status-warn { color: #ffb300; font-weight: bold; }
+    .status-alert { color: #ff5252; font-weight: bold; }
     
     .vic-card {
         background: linear-gradient(135deg, #131722 0%, #1a2332 100%);
         border: 1px solid #2d3748;
-        border-left: 4px solid #00bc8c;
+        border-left: 4px solid #00e676;
         border-radius: 8px;
         padding: 14px 18px;
         margin-bottom: 20px;
     }
-    .vic-title {
-        font-size: 0.95rem;
-        font-weight: 800;
-        letter-spacing: 0.5px;
-        color: #ffffff;
-        display: flex;
-        align-items: center;
-        gap: 8px;
+
+    .metric-badge-card {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 12px;
     }
-    .vic-text {
+    .metric-badge-label {
+        font-size: 0.75rem;
+        color: #8b949e;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-weight: 600;
+    }
+    .metric-badge-val {
+        font-size: 1.6rem;
+        font-weight: 800;
+        margin: 2px 0;
         font-family: 'SF Mono', Monaco, Consolas, monospace;
-        font-size: 0.82rem;
-        color: #cbd5e1;
-        margin-top: 6px;
-        line-height: 1.45;
     }
 
     .unit-tag {
@@ -139,6 +146,69 @@ st.markdown(
 )
 
 # -------------------------------------------------------------
+# TRAFFIC-LIGHT FORMATTING ENGINE (GREEN / YELLOW / RED)
+# -------------------------------------------------------------
+COLOR_GOOD = "#00e676"
+COLOR_NEUTRAL = "#ffb300"
+COLOR_BAD = "#ff5252"
+
+
+def get_traffic_color(val: float, high: float, low: float) -> str:
+    """Returns Green for high, Yellow for mid, Red for low."""
+    if val >= high:
+        return COLOR_GOOD
+    elif val >= low:
+        return COLOR_NEUTRAL
+    return COLOR_BAD
+
+
+def fmt_score_card(
+    label: str, val_text: str, badge_text: str, status: str
+) -> str:
+    """Generates an Apex-styled metric card with strict traffic-light palette."""
+    color = (
+        COLOR_GOOD
+        if status == "good"
+        else (COLOR_NEUTRAL if status == "neutral" else COLOR_BAD)
+    )
+    return f"""
+    <div class="metric-badge-card">
+        <div class="metric-badge-label">{label}</div>
+        <div class="metric-badge-val" style="color: {color};">{val_text}</div>
+        <div style="font-size: 0.78rem; font-weight: 600; color: {color};">{badge_text}</div>
+    </div>
+    """
+
+
+def fmt_spread_str(spread_pct: float) -> str:
+    """Traffic light for Option Spread %. <=4.0% Good, 4.0-6.0% Neutral, >6.0% Bad."""
+    if spread_pct <= 4.0:
+        return f'<span style="color: {COLOR_GOOD}; font-weight: bold;">{spread_pct:.2f}% (Liquid)</span>'
+    elif spread_pct <= 6.0:
+        return f'<span style="color: {COLOR_NEUTRAL}; font-weight: bold;">{spread_pct:.2f}% (Borderline)</span>'
+    return f'<span style="color: {COLOR_BAD}; font-weight: bold;">{spread_pct:.2f}% ⚠️ (TOO WIDE / PROHIBITIVE)</span>'
+
+
+def fmt_delta_str(delta: float) -> str:
+    """Traffic light for target Delta: 0.60 to 0.75 optimal."""
+    abs_d = abs(delta)
+    if 0.60 <= abs_d <= 0.75:
+        return f'<span style="color: {COLOR_GOOD}; font-weight: bold;">{abs_d:.2f} (Target Band: 0.60–0.75)</span>'
+    elif (0.50 <= abs_d < 0.60) or (0.75 < abs_d <= 0.82):
+        return f'<span style="color: {COLOR_NEUTRAL}; font-weight: bold;">{abs_d:.2f} (Acceptable Drift)</span>'
+    return f'<span style="color: {COLOR_BAD}; font-weight: bold;">{abs_d:.2f} (Suboptimal Delta)</span>'
+
+
+def fmt_rs_str(rs_val: float) -> str:
+    """Traffic light for Relative Strength vs Sector."""
+    if rs_val > 0.10:
+        return f'<span style="color: {COLOR_GOOD}; font-weight: bold;">+{rs_val:.2f}% (Leading)</span>'
+    elif rs_val >= -0.10:
+        return f'<span style="color: {COLOR_NEUTRAL}; font-weight: bold;">{rs_val:+.2f}% (In-Line)</span>'
+    return f'<span style="color: {COLOR_BAD}; font-weight: bold;">{rs_val:.2f}% (Lagging Drag)</span>'
+
+
+# -------------------------------------------------------------
 # ACCESS GATE (PIN: Tactical)
 # -------------------------------------------------------------
 ACCESS_PIN = os.getenv("DASHBOARD_PIN", "Tactical")
@@ -159,7 +229,9 @@ if not st.session_state.authenticated:
     )
     col1, col2, col3 = st.columns([1, 1.2, 1])
     with col2:
-        pin_input = st.text_input("Enter Access PIN", type="password", placeholder="••••••••")
+        pin_input = st.text_input(
+            "Enter Access PIN", type="password", placeholder="••••••••"
+        )
         if st.button("Authenticate Session", use_container_width=True):
             if pin_input == ACCESS_PIN:
                 st.session_state.authenticated = True
@@ -182,15 +254,19 @@ with st.sidebar:
         """
         <div style="text-align: center; margin-top: -10px; margin-bottom: 20px;">
             <div style="font-size: 1.3rem; font-weight: 800; letter-spacing: 1px; color: #ffffff;">VICTOR'S DASHBOARD</div>
-            <div style="font-size: 0.75rem; color: #f39c12; letter-spacing: 1.2px; font-weight: 600;">SUPERVISED BY VIC AI</div>
+            <div style="font-size: 0.75rem; color: #ffb300; letter-spacing: 1.2px; font-weight: 600;">SUPERVISED BY VIC AI</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     st.markdown("### Risk Engine Parameters")
-    unit_risk_dollars = st.number_input("Unit Risk Budget (1R)", value=250.0, step=25.0)
-    max_portfolio_risk = st.slider("Max Open Risk %", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
+    unit_risk_dollars = st.number_input(
+        "Unit Risk Budget (1R)", value=250.0, step=25.0
+    )
+    max_portfolio_risk = st.slider(
+        "Max Open Risk %", min_value=0.5, max_value=5.0, value=2.0, step=0.5
+    )
 
     st.markdown("### Autonomous Officer (VIC)")
     st.caption("Active Mode: **Real-Time Macro Veto & ORB Gatekeeper**")
@@ -206,11 +282,25 @@ with st.sidebar:
 # TOP TELEMETRY: SYSTEM HEALTH & RISK COCKPIT
 # -------------------------------------------------------------
 st.title("⚡ Victor's Dashboard")
-st.caption("Apex Quantitative Intelligence Terminal | Supervised by VIC (Autonomous Risk Officer)")
+st.caption(
+    "Apex Quantitative Intelligence Terminal | Supervised by VIC (Autonomous"
+    " Risk Officer)"
+)
 
 now_et = datetime.now()
 is_weekend = now_et.weekday() >= 5
-market_status = "CLOSED (Weekend)" if is_weekend else ("OPEN" if (now_et.hour >= 9 and (now_et.hour < 16 or (now_et.hour == 9 and now_et.minute >= 30))) else "CLOSED")
+market_status = (
+    "CLOSED (Weekend)"
+    if is_weekend
+    else (
+        "OPEN"
+        if (
+            now_et.hour >= 9
+            and (now_et.hour < 16 or (now_et.hour == 9 and now_et.minute >= 30))
+        )
+        else "CLOSED"
+    )
+)
 market_color = "status-warn" if market_status != "OPEN" else "status-live"
 
 st.markdown(
@@ -232,19 +322,32 @@ st.markdown(
 # VIC AI EXECUTIVE DESK BRIEFING
 # -------------------------------------------------------------
 if vic_manager:
-    if "vic_briefing_cache" not in st.session_state or st.session_state["vic_briefing_cache"] is None:
-        st.session_state["vic_briefing_cache"] = vic_manager.generate_premarket_briefing()
-    
+    if (
+        "vic_briefing_cache" not in st.session_state
+        or st.session_state["vic_briefing_cache"] is None
+    ):
+        st.session_state["vic_briefing_cache"] = (
+            vic_manager.generate_premarket_briefing()
+        )
+
     vic_briefing = st.session_state["vic_briefing_cache"]
-    
-    with st.expander("🏛️ VIC AI Desk Manager Briefing & Macro Bias", expanded=True):
+
+    with st.expander(
+        "🏛️ VIC AI Desk Manager Briefing & Macro Bias", expanded=True
+    ):
         st.code(vic_briefing, language="markdown")
 
 search_col1, search_col2 = st.columns([2, 2])
 with search_col1:
-    selected_ticker = st.text_input("Asset Ticker Symbol", value="META", max_chars=8).upper().strip()
+    selected_ticker = (
+        st.text_input("Asset Ticker Symbol", value="META", max_chars=8)
+        .upper()
+        .strip()
+    )
 with search_col2:
-    lookback_days = st.slider("Lookback (Days)", min_value=30, max_value=365, value=180)
+    lookback_days = st.slider(
+        "Lookback (Days)", min_value=30, max_value=365, value=180
+    )
 
 st.markdown("---")
 
@@ -259,22 +362,83 @@ tab_analysis, tab_engine, tab_calendar = st.tabs([
 # =============================================================
 with tab_analysis:
 
-    with st.expander("⚡ Hero AI Active Strategies (Decision-Grade Matrix)", expanded=True):
-        st.caption("Auditable execution matrix supervised by VIC: Explicit Option Type, dynamic order state, and full horizontal scroll.")
-        
-        if st.button("Run Hero AI Strategy Screen", key="btn_hero_screen", use_container_width=True):
-            with st.spinner("Screening factors, sector clusters, and option order books..."):
-                universe = ["QQQ", "SPY", "NVDA", "AMD", "COIN", "META", "TSLA"]
+    with st.expander(
+        "⚡ Hero AI Active Strategies (Decision-Grade Matrix)", expanded=True
+    ):
+        st.caption(
+            "Auditable execution matrix supervised by VIC: Explicit Option"
+            " Type, dynamic order state, and full horizontal scroll."
+        )
+
+        if st.button(
+            "Run Hero AI Strategy Screen",
+            key="btn_hero_screen",
+            use_container_width=True,
+        ):
+            with st.spinner(
+                "Screening factors, sector clusters, and option order books..."
+            ):
+                universe = [
+                    "QQQ",
+                    "SPY",
+                    "NVDA",
+                    "AMD",
+                    "COIN",
+                    "META",
+                    "TSLA",
+                ]
                 screen_rows = []
 
                 oos_profiles = {
-                    "QQQ":  {"n": 243, "win_rate": "67.4%", "exp_r": 0.54, "sector": "XLK", "cluster": "Tech"},
-                    "NVDA": {"n": 198, "win_rate": "68.1%", "exp_r": 0.58, "sector": "SMH", "cluster": "Semis"},
-                    "AMD":  {"n": 176, "win_rate": "63.5%", "exp_r": 0.41, "sector": "SMH", "cluster": "Semis"},
-                    "TSLA": {"n": 210, "win_rate": "61.8%", "exp_r": 0.36, "sector": "XLY", "cluster": "Consumer"},
-                    "SPY":  {"n": 312, "win_rate": "59.2%", "exp_r": 0.28, "sector": "SPY", "cluster": "Macro"},
-                    "META": {"n": 221, "win_rate": "54.1%", "exp_r": 0.15, "sector": "XLC", "cluster": "Comms"},
-                    "COIN": {"n": 154, "win_rate": "58.7%", "exp_r": 0.24, "sector": "ARKF", "cluster": "Crypto"},
+                    "QQQ": {
+                        "n": 243,
+                        "win_rate": "67.4%",
+                        "exp_r": 0.54,
+                        "sector": "XLK",
+                        "cluster": "Tech",
+                    },
+                    "NVDA": {
+                        "n": 198,
+                        "win_rate": "68.1%",
+                        "exp_r": 0.58,
+                        "sector": "SMH",
+                        "cluster": "Semis",
+                    },
+                    "AMD": {
+                        "n": 176,
+                        "win_rate": "63.5%",
+                        "exp_r": 0.41,
+                        "sector": "SMH",
+                        "cluster": "Semis",
+                    },
+                    "TSLA": {
+                        "n": 210,
+                        "win_rate": "61.8%",
+                        "exp_r": 0.36,
+                        "sector": "XLY",
+                        "cluster": "Consumer",
+                    },
+                    "SPY": {
+                        "n": 312,
+                        "win_rate": "59.2%",
+                        "exp_r": 0.28,
+                        "sector": "SPY",
+                        "cluster": "Macro",
+                    },
+                    "META": {
+                        "n": 221,
+                        "win_rate": "54.1%",
+                        "exp_r": 0.15,
+                        "sector": "XLC",
+                        "cluster": "Comms",
+                    },
+                    "COIN": {
+                        "n": 154,
+                        "win_rate": "58.7%",
+                        "exp_r": 0.24,
+                        "sector": "ARKF",
+                        "cluster": "Crypto",
+                    },
                 }
 
                 approved_clusters = set()
@@ -291,39 +455,64 @@ with tab_analysis:
                     slope = feat["ema20_slope"] if feat else 0.0
 
                     alpha_score = alpha_info.get("alpha_score", 50.0)
-                    rvol_pct = alpha_info.get("rvol_metrics", {}).get("percentile", 50.0)
-                    rvol_z = alpha_info.get("rvol_metrics", {}).get("zscore", 0.0)
-                    rs_sector = alpha_info.get("regime_metrics", {}).get("rs_sector", 0.0)
+                    rvol_pct = alpha_info.get("rvol_metrics", {}).get(
+                        "percentile", 50.0
+                    )
+                    rvol_z = alpha_info.get("rvol_metrics", {}).get(
+                        "zscore", 0.0
+                    )
+                    rs_sector = alpha_info.get("regime_metrics", {}).get(
+                        "rs_sector", 0.0
+                    )
 
-                    profile = oos_profiles.get(ticker, {"n": 150, "win_rate": "55.0%", "exp_r": 0.20, "sector": "SPY", "cluster": "General"})
+                    profile = oos_profiles.get(
+                        ticker,
+                        {
+                            "n": 150,
+                            "win_rate": "55.0%",
+                            "exp_r": 0.20,
+                            "sector": "SPY",
+                            "cluster": "General",
+                        },
+                    )
                     sec_ticker = profile["sector"]
                     sec_info = ae.compute_alpha_score(sec_ticker)
                     regime_score = sec_info.get("alpha_score", 70.0)
 
                     # Directional setup logic
-                    is_bullish = (spot > orb_h) and (spot > vwap) and (slope > 0)
-                    is_bearish = (spot < orb_l) and (spot < vwap) and (slope < 0)
+                    is_bullish = (
+                        (spot > orb_h) and (spot > vwap) and (slope > 0)
+                    )
+                    is_bearish = (
+                        (spot < orb_l) and (spot < vwap) and (slope < 0)
+                    )
 
                     if is_bullish:
                         option_type = "🟢 CALL"
                         trigger = f"> ${orb_h:.2f}"
                         stop_level = f"${orb_h - (1.0 * atr):.2f}"
                         target_level = f"${orb_h + (2.0 * atr):.2f}"
-                        opt_info = oe.get_best_momentum_contract(ticker, call=True)
+                        opt_info = oe.get_best_momentum_contract(
+                            ticker, call=True
+                        )
                         has_setup = True
                     elif is_bearish:
                         option_type = "🔴 PUT"
                         trigger = f"< ${orb_l:.2f}"
                         stop_level = f"${orb_l + (1.0 * atr):.2f}"
                         target_level = f"${orb_l - (2.0 * atr):.2f}"
-                        opt_info = oe.get_best_momentum_contract(ticker, call=False)
+                        opt_info = oe.get_best_momentum_contract(
+                            ticker, call=False
+                        )
                         has_setup = True
                     else:
                         option_type = "—"
                         trigger = "—"
                         stop_level = "—"
                         target_level = "—"
-                        opt_info = oe.get_best_momentum_contract(ticker, call=True)
+                        opt_info = oe.get_best_momentum_contract(
+                            ticker, call=True
+                        )
                         has_setup = False
 
                     exec_score = opt_info.get("execution_score", 50.0)
@@ -335,15 +524,28 @@ with tab_analysis:
                     if not has_setup:
                         hero_decision = "⚪ NO SETUP"
                         order_state = "—"
-                        reasons.append("Inside 30m ORB" if (spot <= orb_h and spot >= orb_l) else "EMA flat/chop")
+                        reasons.append(
+                            "Inside 30m ORB"
+                            if (spot <= orb_h and spot >= orb_l)
+                            else "EMA flat/chop"
+                        )
                     else:
-                        # VIC AI Gatekeeper Check
                         direction_str = "CALL" if is_bullish else "PUT"
-                        vic_verdict = vic_manager.audit_trade_candidate(ticker, direction_str, alpha_score) if vic_manager else {"approved": True, "reason": "Bypassed"}
+                        vic_verdict = (
+                            vic_manager.audit_trade_candidate(
+                                ticker, direction_str, alpha_score
+                            )
+                            if vic_manager
+                            else {"approved": True, "reason": "Bypassed"}
+                        )
 
                         alpha_pass = alpha_score >= 70.0
                         exec_pass = exec_score >= 65.0
-                        regime_pass = regime_score >= 65.0 if is_bullish else regime_score <= 55.0
+                        regime_pass = (
+                            regime_score >= 65.0
+                            if is_bullish
+                            else regime_score <= 55.0
+                        )
 
                         if not vic_verdict["approved"]:
                             reasons.append(f"VIC Veto: {vic_verdict['reason']}")
@@ -354,8 +556,16 @@ with tab_analysis:
                         if not regime_pass:
                             reasons.append(f"Regime ({regime_score:.0f}) drag")
 
-                        if alpha_pass and exec_pass and regime_pass and vic_verdict["approved"]:
-                            if cluster in approved_clusters and cluster not in ["Macro", "General"]:
+                        if (
+                            alpha_pass
+                            and exec_pass
+                            and regime_pass
+                            and vic_verdict["approved"]
+                        ):
+                            if cluster in approved_clusters and cluster not in [
+                                "Macro",
+                                "General",
+                            ]:
                                 hero_decision = "⚠️ CONDITIONAL"
                                 order_state = "⏸ BLOCKED"
                                 reasons.append(f"Cluster '{cluster}' active")
@@ -364,7 +574,11 @@ with tab_analysis:
                                 order_state = "🟡 ARMED"
                                 approved_clusters.add(cluster)
                                 reasons.append("Confluence aligned")
-                        elif alpha_score >= 65.0 and exec_score >= 60.0 and vic_verdict["approved"]:
+                        elif (
+                            alpha_score >= 65.0
+                            and exec_score >= 60.0
+                            and vic_verdict["approved"]
+                        ):
                             hero_decision = "⚠️ CONDITIONAL"
                             order_state = "⏳ WAITING"
                         else:
@@ -373,9 +587,16 @@ with tab_analysis:
 
                     decision_reason = " | ".join(reasons) if reasons else "Active"
                     rvol_compact = f"{int(rvol_pct)}th (z:{rvol_z:+.1f})"
-                    rs_compact = f"{rs_sector:+.2f}%" if ticker not in ["SPY", "QQQ"] else "—"
-
-                    contract_display = f"{contract_sym} (Δ{delta_val:.2f})" if contract_sym != "NONE" else "NONE"
+                    rs_compact = (
+                        f"{rs_sector:+.2f}%"
+                        if ticker not in ["SPY", "QQQ"]
+                        else "—"
+                    )
+                    contract_display = (
+                        f"{contract_sym} (Δ{delta_val:.2f})"
+                        if contract_sym != "NONE"
+                        else "NONE"
+                    )
 
                     screen_rows.append({
                         "Ticker": ticker,
@@ -406,7 +627,7 @@ with tab_analysis:
             )
 
     # ---------------------------------------------------------
-    # SINGLE ASSET AUDIT & CONFLUENCE INSPECTOR
+    # SINGLE ASSET AUDIT & CONFLUENCE INSPECTOR (TRAFFIC LIGHT CODED)
     # ---------------------------------------------------------
     st.subheader(f"⚡ Technical Confluence: {selected_ticker}")
 
@@ -417,40 +638,138 @@ with tab_analysis:
     e_score = opt_info.get("execution_score", 50.0)
     r_pct = alpha_info.get("rvol_metrics", {}).get("percentile", 50.0)
     rs_sec = alpha_info.get("regime_metrics", {}).get("rs_sector", 0.0)
+    spread_val = opt_info.get("spread_pct", 0.0)
+    delta_val = opt_info.get("delta", 0.65)
 
+    # 1. Status classification for top 4 cards
+    # Alpha Score
+    if a_score >= 70.0:
+        a_status, a_badge = "good", "↑ Prime Quality"
+    elif a_score >= 60.0:
+        a_status, a_badge = "neutral", "↔ Acceptable Threshold"
+    else:
+        a_status, a_badge = "bad", "↓ Sub-par Quality (Veto Risk)"
+
+    # Execution Score
+    if e_score >= 75.0:
+        e_status, e_badge = "good", "↑ High Contract Liquidity"
+    elif e_score >= 60.0:
+        e_status, e_badge = "neutral", "↔ Marginal Liquidity (Caution)"
+    else:
+        e_status, e_badge = "bad", "↓ Poor Liquidity (Spread Penalty)"
+
+    # RVOL Percentile
+    if r_pct >= 75.0:
+        r_status, r_badge = "good", "↑ Heavy Institutional Volume"
+    elif r_pct >= 45.0:
+        r_status, r_badge = "neutral", "↔ Average Flow"
+    else:
+        r_status, r_badge = "bad", "↓ Low Drift Volume"
+
+    # Relative Strength vs Sector
+    if rs_sec > 0.15:
+        rs_status, rs_badge = "good", f"↑ +{rs_sec:.2f}% Outperforming Sector"
+    elif rs_sec >= -0.15:
+        rs_status, rs_badge = "neutral", f"↔ {rs_sec:+.2f}% Neutral In-Line"
+    else:
+        rs_status, rs_badge = "bad", f"↓ {rs_sec:.2f}% Lagging Drag"
+
+    # Render Custom Traffic-Light Metric Cards
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Alpha Score", f"{a_score:.0f}/100", "Underlying Quality")
-    m2.metric("Option Exec Score", f"{e_score:.0f}/100", "Contract Liquidity")
-    m3.metric("RVOL Percentile", f"{r_pct:.0f}th", "Time-of-Day Volume")
-    m4.metric("RS vs Sector", f"{rs_sec:+.2f}%", "Outperformance")
+    with m1:
+        st.markdown(
+            fmt_score_card(
+                "Alpha Score", f"{a_score:.0f}/100", a_badge, a_status
+            ),
+            unsafe_allow_html=True,
+        )
+    with m2:
+        st.markdown(
+            fmt_score_card(
+                "Option Exec Score", f"{e_score:.0f}/100", e_badge, e_status
+            ),
+            unsafe_allow_html=True,
+        )
+    with m3:
+        st.markdown(
+            fmt_score_card(
+                "RVOL Percentile", f"{r_pct:.0f}th", r_badge, r_status
+            ),
+            unsafe_allow_html=True,
+        )
+    with m4:
+        st.markdown(
+            fmt_score_card(
+                "RS vs Sector", f"{rs_sec:+.2f}%", rs_badge, rs_status
+            ),
+            unsafe_allow_html=True,
+        )
 
-    with st.expander(f"🔬 Option Order Book & Greeks Audit: {selected_ticker}", expanded=False):
+    with st.expander(
+        f"🔬 Option Order Book & Greeks Audit: {selected_ticker}", expanded=False
+    ):
         c_a, c_o = st.columns(2)
         bd = alpha_info.get("breakdown", {})
         cd = alpha_info.get("candle_metrics", {})
-        
+
         with c_a:
             st.markdown("#### 📐 Alpha Score Point Breakdown")
-            st.write(f"• **Breakout Quality:** `{bd.get('breakout_quality', 0.0):.1f}/20 pts` (Body: `{cd.get('body_pct', 0.0)}%`, Wick: `{cd.get('upper_wick_pct', 0.0)}%`)")
-            st.write(f"• **Time-Adjusted RVOL:** `{bd.get('time_rvol', 0.0):.1f}/20 pts` ({r_pct:.0f}th percentile vs 40 sessions)")
-            st.write(f"• **Relative Strength:** `{bd.get('relative_strength', 0.0):.1f}/15 pts` (vs Sector: `{rs_sec:+.2f}%`)")
-            st.write(f"• **VWAP Alignment:** `{bd.get('vwap_alignment', 0.0):.1f}/15 pts`")
-            st.write(f"• **Market Regime:** `{bd.get('market_regime', 0.0):.1f}/15 pts` (Sector & Macro)")
-            st.write(f"• **EMA Slope & Compression:** `{bd.get('ema_slope', 0.0) + bd.get('compression', 0.0):.1f}/15 pts`")
+            st.markdown(
+                f"• **Breakout Quality:** `{bd.get('breakout_quality', 0.0):.1f}/20 pts` (Body: `{cd.get('body_pct', 0.0)}%`, Wick: `{cd.get('upper_wick_pct', 0.0)}%`)"
+            )
+            st.markdown(
+                f"• **Time-Adjusted RVOL:** `{bd.get('time_rvol', 0.0):.1f}/20 pts` ({r_pct:.0f}th percentile vs 40 sessions)"
+            )
+            st.markdown(
+                f"• **Relative Strength:** `{bd.get('relative_strength', 0.0):.1f}/15 pts` (vs Sector: {fmt_rs_str(rs_sec)})",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"• **VWAP Alignment:** `{bd.get('vwap_alignment', 0.0):.1f}/15 pts`"
+            )
+            st.markdown(
+                f"• **Market Regime:** `{bd.get('market_regime', 0.0):.1f}/15 pts` (Sector & Macro)"
+            )
+            st.markdown(
+                f"• **EMA Slope & Compression:** `{bd.get('ema_slope', 0.0) + bd.get('compression', 0.0):.1f}/15 pts`"
+            )
 
         with c_o:
             st.markdown("#### 🎯 Contract Liquidity & Delta Audit")
-            st.write(f"• **Contract:** `{opt_info.get('contractSymbol', 'N/A')}`")
-            st.write(f"• **DTE:** `{opt_info.get('dte', 0)}` days | **Expiration:** `{opt_info.get('expiration', 'N/A')}`")
-            st.write(f"• **Delta:** `{opt_info.get('delta', 0.0):.2f}` (Target Band: 0.60–0.75)")
-            st.write(f"• **Bid / Ask / Mid:** `${opt_info.get('bid', 0.0):.2f}` / `${opt_info.get('ask', 0.0):.2f}` / `${opt_info.get('mid_price', 0.0):.2f}`")
-            st.write(f"• **Spread %:** `{opt_info.get('spread_pct', 0.0):.2f}%`")
-            st.write(f"• **Volume / Open Interest:** `{opt_info.get('volume', 0):,}` / `{opt_info.get('open_interest', 0):,}`")
-            st.write(f"• **Implied Volatility:** `{opt_info.get('iv', 0.0):.1f}%`")
+            st.markdown(
+                f"• **Contract:** `{opt_info.get('contractSymbol', 'N/A')}`"
+            )
+            st.markdown(
+                f"• **DTE:** `{opt_info.get('dte', 0)}` days | **Expiration:**"
+                f" `{opt_info.get('expiration', 'N/A')}`"
+            )
+            st.markdown(
+                f"• **Delta:** {fmt_delta_str(delta_val)}",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"• **Bid / Ask / Mid:** `${opt_info.get('bid', 0.0):.2f}` / `${opt_info.get('ask', 0.0):.2f}` / `${opt_info.get('mid_price', 0.0):.2f}`"
+            )
+            st.markdown(
+                f"• **Spread %:** {fmt_spread_str(spread_val)}",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"• **Volume / Open Interest:** `{opt_info.get('volume', 0):,}`"
+                f" / `{opt_info.get('open_interest', 0):,}`"
+            )
+            st.markdown(
+                f"• **Implied Volatility:** `{opt_info.get('iv', 0.0):.1f}%`"
+            )
 
     # Interactive Price & Trend Chart
     try:
-        df = yf.download(selected_ticker, period=f"{lookback_days}d", interval="1d", progress=False)
+        df = yf.download(
+            selected_ticker,
+            period=f"{lookback_days}d",
+            interval="1d",
+            progress=False,
+        )
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -459,12 +778,38 @@ with tab_analysis:
             df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
             fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Price"
-            ))
-            fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], line=dict(color="#00bc8c", width=1.5), name="20 EMA"))
-            fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], line=dict(color="#f39c12", width=1.5), name="50 EMA"))
-            fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=450, margin=dict(l=10, r=10, t=10, b=10))
+            fig.add_trace(
+                go.Candlestick(
+                    x=df.index,
+                    open=df["Open"],
+                    high=df["High"],
+                    low=df["Low"],
+                    close=df["Close"],
+                    name="Price",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["EMA20"],
+                    line=dict(color="#00e676", width=1.5),
+                    name="20 EMA",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["EMA50"],
+                    line=dict(color="#ffb300", width=1.5),
+                    name="50 EMA",
+                )
+            )
+            fig.update_layout(
+                template="plotly_dark",
+                xaxis_rangeslider_visible=False,
+                height=450,
+                margin=dict(l=10, r=10, t=10, b=10),
+            )
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Error loading {selected_ticker}: {e}")
@@ -474,24 +819,45 @@ with tab_analysis:
 
     # SECTION 1: BALANCE SHEET & FORECAST
     st.markdown("---")
-    st.subheader(f"🏛️ Section 1: Balance Sheet, Liquidity & 12-Month Market Forecast: {selected_ticker}")
+    st.subheader(
+        "🏛️ Section 1: Balance Sheet, Liquidity & 12-Month Market Forecast:"
+        f" {selected_ticker}"
+    )
 
     fc = fund.get(
         "forecast_12m",
-        {"target_mean": fund.get("current_price", 0.0), "target_high": fund.get("current_price", 0.0), "target_low": fund.get("current_price", 0.0), "upside_mean_pct": 0.0, "recommendation": "N/A"}
+        {
+            "target_mean": fund.get("current_price", 0.0),
+            "target_high": fund.get("current_price", 0.0),
+            "target_low": fund.get("current_price", 0.0),
+            "upside_mean_pct": 0.0,
+            "recommendation": "N/A",
+        },
     )
     f1, f2, f3, f4 = st.columns(4)
-    f1.metric("12M Mean Target", f"${fc['target_mean']:.2f}", delta=f"{fc['upside_mean_pct']:+.1f}% Return")
+    f1.metric(
+        "12M Mean Target",
+        f"${fc['target_mean']:.2f}",
+        delta=f"{fc['upside_mean_pct']:+.1f}% Return",
+    )
     f2.metric("Analyst Consensus", str(fc["recommendation"]))
     f3.metric("12M High Target", f"${fc['target_high']:.2f}")
     f4.metric("12M Low Target", f"${fc['target_low']:.2f}")
 
     col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-    col_c1.metric("Total Cash & Equivalents", f"${fund['total_cash'] / 1e9:.2f} B")
+    col_c1.metric(
+        "Total Cash & Equivalents", f"${fund['total_cash'] / 1e9:.2f} B"
+    )
     col_c2.metric("Total Debt (Liabilities)", f"${fund['total_debt'] / 1e9:.2f} B")
     net_val = fund["net_cash"] / 1e9
-    col_c3.metric("Net Cash Position", f"${net_val:.2f} B", delta=f"{'+' if net_val >= 0 else ''}{net_val:.2f} B")
-    col_c4.metric("Free Cash Flow (TTM)", f"${fund['free_cash_flow'] / 1e9:.2f} B")
+    col_c3.metric(
+        "Net Cash Position",
+        f"${net_val:.2f} B",
+        delta=f"{'+' if net_val >= 0 else ''}{net_val:.2f} B",
+    )
+    col_c4.metric(
+        "Free Cash Flow (TTM)", f"${fund['free_cash_flow'] / 1e9:.2f} B"
+    )
 
     col_sub1, col_sub2, col_sub3, col_sub4 = st.columns(4)
     col_sub1.metric("Current Ratio (Solvency)", f"{fund['current_ratio']:.2f}")
@@ -501,14 +867,19 @@ with tab_analysis:
 
     # SECTION 2: 8-PILLARS
     st.markdown("---")
-    st.subheader("🏛️ Section 2: The 8-Pillars Valuation Matrix & Assumption Simulator")
-    st.markdown(f"**Scorecard Result:** Passed **{fund['passed_pillars_count']}/8 Pillars**")
+    st.subheader(
+        "🏛️ Section 2: The 8-Pillars Valuation Matrix & Assumption Simulator"
+    )
+    st.markdown(
+        f"**Scorecard Result:** Passed **{fund['passed_pillars_count']}/8"
+        " Pillars**"
+    )
 
     p_cols = st.columns(4)
     for i, p in enumerate(fund["pillars"]):
         with p_cols[i % 4]:
             badge = "✅ PASS" if p["Pass"] else "❌ FAIL"
-            color = "#00bc8c" if p["Pass"] else "#e74c3c"
+            color = "#00e676" if p["Pass"] else "#ff5252"
             st.markdown(
                 f"""
                 <div style="padding:10px; border-radius:8px; background:#1e2430; border-left:4px solid {color}; margin-bottom:8px;">
@@ -520,15 +891,29 @@ with tab_analysis:
                 unsafe_allow_html=True,
             )
 
-    st.markdown("#### 🎮 Interactive Future Assumptions (Play with Low / Mid / High)")
+    st.markdown(
+        "#### 🎮 Interactive Future Assumptions (Play with Low / Mid / High)"
+    )
     c_desc, c_toggle = st.columns([2.5, 1.5])
     with c_desc:
-        st.caption("Select your modeling horizon and adjust growth, margins, and multiples below.")
+        st.caption(
+            "Select your modeling horizon and adjust growth, margins, and"
+            " multiples below."
+        )
     with c_toggle:
-        val_years = st.radio("Valuation Horizon", options=[1, 3, 5], index=2, format_func=lambda x: f"{x}-Year Horizon", horizontal=True, label_visibility="collapsed")
+        val_years = st.radio(
+            "Valuation Horizon",
+            options=[1, 3, 5],
+            index=2,
+            format_func=lambda x: f"{x}-Year Horizon",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
 
     target_year = datetime.now().year + val_years
-    col_labels, col_hist_vals, col_in_low, col_in_mid, col_in_high = st.columns([2, 1.3, 1.2, 1.2, 1.2])
+    col_labels, col_hist_vals, col_in_low, col_in_mid, col_in_high = st.columns(
+        [2, 1.3, 1.2, 1.2, 1.2]
+    )
 
     with col_labels:
         st.markdown("**Valuation Variable**")
@@ -546,56 +931,202 @@ with tab_analysis:
 
     with col_in_low:
         st.markdown("**Low Case**")
-        st.markdown("<div class='unit-tag'>Growth (%)</div>", unsafe_allow_html=True)
-        g_low = st.number_input("Rev Low", value=5.0, step=0.5, format="%.1f", key="glow", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Margin (%)</div>", unsafe_allow_html=True)
-        pm_low = st.number_input("Margin Low", value=max(round(fund["profit_margin"] * 100 - 3, 1), 5.0), step=0.5, format="%.1f", key="pmlow", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Multiple (x)</div>", unsafe_allow_html=True)
-        pe_low = st.number_input("PE Low", value=max(round(fund["trailing_pe"] * 0.7, 1), 12.0), step=0.5, format="%.1f", key="pelow", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Return (%)</div>", unsafe_allow_html=True)
-        ret_low = st.number_input("Ret Low", value=12.5, step=0.5, format="%.1f", key="retlow", label_visibility="collapsed")
+        st.markdown(
+            "<div class='unit-tag'>Growth (%)</div>", unsafe_allow_html=True
+        )
+        g_low = st.number_input(
+            "Rev Low",
+            value=5.0,
+            step=0.5,
+            format="%.1f",
+            key="glow",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Margin (%)</div>", unsafe_allow_html=True
+        )
+        pm_low = st.number_input(
+            "Margin Low",
+            value=max(round(fund["profit_margin"] * 100 - 3, 1), 5.0),
+            step=0.5,
+            format="%.1f",
+            key="pmlow",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Multiple (x)</div>", unsafe_allow_html=True
+        )
+        pe_low = st.number_input(
+            "PE Low",
+            value=max(round(fund["trailing_pe"] * 0.7, 1), 12.0),
+            step=0.5,
+            format="%.1f",
+            key="pelow",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Return (%)</div>", unsafe_allow_html=True
+        )
+        ret_low = st.number_input(
+            "Ret Low",
+            value=12.5,
+            step=0.5,
+            format="%.1f",
+            key="retlow",
+            label_visibility="collapsed",
+        )
 
     with col_in_mid:
         st.markdown("**Mid Case**")
-        st.markdown("<div class='unit-tag'>Growth (%)</div>", unsafe_allow_html=True)
-        g_mid = st.number_input("Rev Mid", value=12.0, step=0.5, format="%.1f", key="gmid", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Margin (%)</div>", unsafe_allow_html=True)
-        pm_mid = st.number_input("Margin Mid", value=max(round(fund["profit_margin"] * 100, 1), 8.0), step=0.5, format="%.1f", key="pmmid", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Multiple (x)</div>", unsafe_allow_html=True)
-        pe_mid = st.number_input("PE Mid", value=max(round(fund["trailing_pe"] * 0.85, 1), 18.0), step=0.5, format="%.1f", key="pemid", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Return (%)</div>", unsafe_allow_html=True)
-        ret_mid = st.number_input("Ret Mid", value=12.5, step=0.5, format="%.1f", key="retmid", label_visibility="collapsed")
+        st.markdown(
+            "<div class='unit-tag'>Growth (%)</div>", unsafe_allow_html=True
+        )
+        g_mid = st.number_input(
+            "Rev Mid",
+            value=12.0,
+            step=0.5,
+            format="%.1f",
+            key="gmid",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Margin (%)</div>", unsafe_allow_html=True
+        )
+        pm_mid = st.number_input(
+            "Margin Mid",
+            value=max(round(fund["profit_margin"] * 100, 1), 8.0),
+            step=0.5,
+            format="%.1f",
+            key="pmmid",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Multiple (x)</div>", unsafe_allow_html=True
+        )
+        pe_mid = st.number_input(
+            "PE Mid",
+            value=max(round(fund["trailing_pe"] * 0.85, 1), 18.0),
+            step=0.5,
+            format="%.1f",
+            key="pemid",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Return (%)</div>", unsafe_allow_html=True
+        )
+        ret_mid = st.number_input(
+            "Ret Mid",
+            value=12.5,
+            step=0.5,
+            format="%.1f",
+            key="retmid",
+            label_visibility="collapsed",
+        )
 
     with col_in_high:
         st.markdown("**High Case**")
-        st.markdown("<div class='unit-tag'>Growth (%)</div>", unsafe_allow_html=True)
-        g_high = st.number_input("Rev High", value=20.0, step=0.5, format="%.1f", key="ghigh", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Margin (%)</div>", unsafe_allow_html=True)
-        pm_high = st.number_input("Margin High", value=round(fund["profit_margin"] * 100 + 4, 1), step=0.5, format="%.1f", key="pmhigh", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Multiple (x)</div>", unsafe_allow_html=True)
-        pe_high = st.number_input("PE High", value=max(round(fund["trailing_pe"] * 1.0, 1), 24.0), step=0.5, format="%.1f", key="pehigh", label_visibility="collapsed")
-        st.markdown("<div class='unit-tag'>Return (%)</div>", unsafe_allow_html=True)
-        ret_high = st.number_input("Ret High", value=12.5, step=0.5, format="%.1f", key="rethigh", label_visibility="collapsed")
+        st.markdown(
+            "<div class='unit-tag'>Growth (%)</div>", unsafe_allow_html=True
+        )
+        g_high = st.number_input(
+            "Rev High",
+            value=20.0,
+            step=0.5,
+            format="%.1f",
+            key="ghigh",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Margin (%)</div>", unsafe_allow_html=True
+        )
+        pm_high = st.number_input(
+            "Margin High",
+            value=round(fund["profit_margin"] * 100 + 4, 1),
+            step=0.5,
+            format="%.1f",
+            key="pmhigh",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Multiple (x)</div>", unsafe_allow_html=True
+        )
+        pe_high = st.number_input(
+            "PE High",
+            value=max(round(fund["trailing_pe"] * 1.0, 1), 24.0),
+            step=0.5,
+            format="%.1f",
+            key="pehigh",
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='unit-tag'>Return (%)</div>", unsafe_allow_html=True
+        )
+        ret_high = st.number_input(
+            "Ret High",
+            value=12.5,
+            step=0.5,
+            format="%.1f",
+            key="rethigh",
+            label_visibility="collapsed",
+        )
 
     assumptions = {
-        "Low": {"rev_growth": g_low, "profit_margin": pm_low, "target_pe": pe_low, "desired_return": ret_low},
-        "Mid": {"rev_growth": g_mid, "profit_margin": pm_mid, "target_pe": pe_mid, "desired_return": ret_mid},
-        "High": {"rev_growth": g_high, "profit_margin": pm_high, "target_pe": pe_high, "desired_return": ret_high},
+        "Low": {
+            "rev_growth": g_low,
+            "profit_margin": pm_low,
+            "target_pe": pe_low,
+            "desired_return": ret_low,
+        },
+        "Mid": {
+            "rev_growth": g_mid,
+            "profit_margin": pm_mid,
+            "target_pe": pe_mid,
+            "desired_return": ret_mid,
+        },
+        "High": {
+            "rev_growth": g_high,
+            "profit_margin": pm_high,
+            "target_pe": pe_high,
+            "desired_return": ret_high,
+        },
     }
 
     val = fe.calculate_fair_values(fund, assumptions, years=val_years)
 
-    st.markdown(f"#### 🎯 {val_years}-Year Target Prices & Fair Value Buy Targets")
+    st.markdown(
+        f"#### 🎯 {val_years}-Year Target Prices & Fair Value Buy Targets"
+    )
     v1, v2, v3 = st.columns(3)
     with v1:
-        st.metric(label="Low Case Fair Buy Value", value=f"${val['Low']['fair_value_today']:.2f}", delta=f"{val['Low']['upside_vs_fair']:+.1f}% vs Spot")
-        st.caption(f"Estimated {target_year} Price: **${val['Low']['future_price']:.2f}**")
+        st.metric(
+            label="Low Case Fair Buy Value",
+            value=f"${val['Low']['fair_value_today']:.2f}",
+            delta=f"{val['Low']['upside_vs_fair']:+.1f}% vs Spot",
+        )
+        st.caption(
+            f"Estimated {target_year} Price:"
+            f" **${val['Low']['future_price']:.2f}**"
+        )
     with v2:
-        st.metric(label="Mid Case Fair Buy Value", value=f"${val['Mid']['fair_value_today']:.2f}", delta=f"{val['Mid']['upside_vs_fair']:+.1f}% vs Spot")
-        st.caption(f"Estimated {target_year} Price: **${val['Mid']['future_price']:.2f}**")
+        st.metric(
+            label="Mid Case Fair Buy Value",
+            value=f"${val['Mid']['fair_value_today']:.2f}",
+            delta=f"{val['Mid']['upside_vs_fair']:+.1f}% vs Spot",
+        )
+        st.caption(
+            f"Estimated {target_year} Price:"
+            f" **${val['Mid']['future_price']:.2f}**"
+        )
     with v3:
-        st.metric(label="High Case Fair Buy Value", value=f"${val['High']['fair_value_today']:.2f}", delta=f"{val['High']['upside_vs_fair']:+.1f}% vs Spot")
-        st.caption(f"Estimated {target_year} Price: **${val['High']['future_price']:.2f}**")
+        st.metric(
+            label="High Case Fair Buy Value",
+            value=f"${val['High']['fair_value_today']:.2f}",
+            delta=f"{val['High']['upside_vs_fair']:+.1f}% vs Spot",
+        )
+        st.caption(
+            f"Estimated {target_year} Price:"
+            f" **${val['High']['future_price']:.2f}**"
+        )
 
 # =============================================================
 # TAB 2: INTRADAY OPTIONS ENGINE & ORB READINESS
@@ -605,11 +1136,19 @@ with tab_engine:
     regime = mb.get_market_regime()
     c1, c2, c3 = st.columns([1, 2, 2])
     with c1:
-        st.metric(label="CBOE Volatility (^VIX)", value=f"{regime['vix']:.2f}", delta=f"{regime['vix_change']:+.2f}")
+        st.metric(
+            label="CBOE Volatility (^VIX)",
+            value=f"{regime['vix']:.2f}",
+            delta=f"{regime['vix_change']:+.2f}",
+        )
     with c2:
         badge = regime["badge_color"]
         name = regime["regime"]
-        st.markdown(f"**Market Regime:** <span style='color:{badge}; font-weight:bold;'>{name}</span>", unsafe_allow_html=True)
+        st.markdown(
+            "**Market Regime:**"
+            f" <span style='color:{badge}; font-weight:bold;'>{name}</span>",
+            unsafe_allow_html=True,
+        )
         st.caption(regime["note"])
     with c3:
         st.markdown("**Strategy Focus:** `30m ORB + Midpoint Limit`")
@@ -642,7 +1181,9 @@ with tab_calendar:
 
     with sub2:
         with st.spinner("Fetching confirmed earnings dates..."):
-            earnings_df = ec.get_universe_earnings(["NVDA", "AAPL", "AMD", "AMZN", "MSFT", "TSLA"])
+            earnings_df = ec.get_universe_earnings(
+                ["NVDA", "AAPL", "AMD", "AMZN", "MSFT", "TSLA"]
+            )
         if not earnings_df.empty:
             st.dataframe(earnings_df, use_container_width=True, hide_index=True)
         else:
