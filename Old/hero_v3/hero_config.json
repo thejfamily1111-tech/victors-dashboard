@@ -1,0 +1,25 @@
+{
+  "paper": true,
+  "fade": {
+    "acceptance_closes": 1,
+    "failure_window_bars": 3,
+    "confirmation_window_bars": 3,
+    "stop_buffer_atr": 0.1,
+    "retest_tolerance_atr": 0.1,
+    "entry_mode": "A",
+    "target_model": "MIDPOINT",
+    "fixed_r": 1.0
+  },
+  "risk": {
+    "risk_fraction": 0.005,
+    "max_portfolio_premium_fraction": 0.035,
+    "max_names": 7,
+    "max_pending": 2,
+    "max_contracts": 10,
+    "pending_ttl_bars": 2,
+    "entry_cutoff": "15:00",
+    "flatten_time": "15:45",
+    "daily_loss_fraction": 0.02,
+    "max_quote_age": 30
+  }
+}

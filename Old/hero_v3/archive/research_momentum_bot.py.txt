@@ -1,0 +1,1707 @@
+"""
+research_momentum_bot.py
+
+HERO / VIC / LEARN — clean paper-execution engine.
+
+Design:
+- 30-minute ORB is built from completed 5-minute bars and locks at 10:00 ET.
+- 15-minute bars provide structural EMA/ATR context.
+- Completed 5-minute bars provide tactical entry timing.
+- VIC governs macro/risk permission and sizing.
+- LEARN receives immutable candidate telemetry (including counterfactual rejections).
+- Broker order state is authoritative for fills.
+- Risk loop manages only HERO-owned contracts.
+- 3-Tier Extension Policy:
+    * Tier 1 (0.00 - 1.00R): ELIGIBLE - Primary Momentum Window
+    * Tier 2 (1.00 - 2.00R): CAUTION / SHADOW - Tracked counterfactually in LEARN
+    * Tier 3 (> 2.00R):      HARD BLOCK - Extreme Exhaustion Circuit Breaker
+
+Paper trading is hard-coded below.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, time as dtime, timedelta
+import json
+import math
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+
+from safe_yf import safe_download, safe_fast_price
+
+from alpaca.data.historical.option import OptionHistoricalDataClient
+from alpaca.data.requests import OptionSnapshotRequest
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import ContractType, OrderSide, TimeInForce
+from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest
+
+import alpha_engine as ae
+import learn_tracker as lt
+import market_barometer as mb
+import market_mechanics_bible as mmb
+
+
+# ============================================================
+# 0. Compatibility guard
+# ============================================================
+
+_REQUIRED_MMB = (
+    "ORBState",
+    "calculate_multi_orb",
+    "compute_same_clock_rvol",
+    "compute_orb30_width_percentile",
+    "compute_breakout_attempt_state",
+    "classify_setup_candidate",
+    "compute_extension_r",
+    "compute_effective_rr",
+)
+
+_missing_mmb = [name for name in _REQUIRED_MMB if not hasattr(mmb, name)]
+if _missing_mmb:
+    raise RuntimeError(
+        "This bot requires the cleaned market_mechanics_bible v2 module. "
+        f"Missing: {_missing_mmb}"
+    )
+
+
+# ============================================================
+# 1. Environment / clients
+# ============================================================
+
+EASTERN_TZ = ZoneInfo("America/New_York")
+
+for env_path in (
+    "/Users/vic/Desktop/Coding/.env",
+    "/Users/vic/trading_bot/.env",
+    ".env",
+):
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+
+API_KEY = os.getenv("APCA_API_KEY_ID") or os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("APCA_API_SECRET_KEY") or os.getenv("ALPACA_SECRET_KEY")
+
+NAIVE_BAR_SOURCE_TZ = os.getenv("HERO_NAIVE_BAR_TZ")
+
+PAPER_TRADING = True
+
+if API_KEY and SECRET_KEY:
+    trading_client = TradingClient(API_KEY, SECRET_KEY, paper=PAPER_TRADING)
+    option_data_client = OptionHistoricalDataClient(API_KEY, SECRET_KEY)
+else:
+    trading_client = None
+    option_data_client = None
+
+
+# ============================================================
+# 2. Desk configuration & Capacity
+# ============================================================
+
+UNIVERSE = [
+    "SPY", "QQQ", "SMH", "NVDA", "AMD",
+    "MSFT", "AAPL", "AMZN", "COIN", "META", "TSLA",
+]
+
+SECTOR_MAP = {
+    "SPY": "SPY",
+    "QQQ": "SPY",
+    "SMH": "QQQ",
+    "NVDA": "SMH",
+    "AMD": "SMH",
+    "MSFT": "QQQ",
+    "AAPL": "QQQ",
+    "AMZN": "QQQ",
+    "META": "QQQ",
+    "TSLA": "QQQ",
+    "COIN": "QQQ",
+}
+
+# Risk & Capacity limits
+RISK_PER_TRADE_PERCENT = 0.005
+MAX_CONCURRENT_HERO_NAMES = 7     # Capacity set to 7 active slots
+MAX_PENDING_SETUPS = 2            # Max 2 concurrent pending limit orders
+MAX_CONTRACTS_PER_TICKER = 10
+OPTION_STOP_RISK_BUFFER = 1.25
+
+# Options
+TARGET_DELTA = 0.65
+DELTA_TOLERANCE = 0.10
+MAX_RELATIVE_SPREAD = 0.06
+MIN_DTE = 1
+MAX_DTE = 7
+MIN_OPTION_BID = 0.05
+REQUIRE_BROKER_GREEKS = True
+
+# Schedule
+FIRST_ENTRY_TIME = dtime(10, 5)
+ENTRY_CUTOFF_TIME = dtime(15, 0)
+FLATTEN_TIME = dtime(15, 45)
+RISK_LOOP_SECONDS = 10
+SCAN_DELAY_SECONDS = 10
+ORDER_MUTEX_SECONDS = 60
+PENDING_TTL_5M_BARS = 2
+
+# Data
+BAR_LABEL = "start"
+FIVE_MIN_PERIOD = "60d"
+FIFTEEN_MIN_PERIOD = "30d"
+RVOL_LOOKBACK_SESSIONS = 40
+ORB_WIDTH_LOOKBACK_SESSIONS = 40
+MAX_5M_COMPLETION_AGE_SECONDS = 180
+MAX_15M_COMPLETION_AGE_SECONDS = 18 * 60
+
+# Research / enforcement switches
+ALPHA_MIN_SCORE = 60.0
+TRAP_EXECUTION_ENABLED = False
+
+# Tiered Extension Limits
+SOFT_EXTENSION_R_LIMIT = 1.00     # Tier 1 (<= 1.0R): Normal execution
+HARD_EXTENSION_R_LIMIT = 2.00     # Tier 3 (> 2.0R): Extreme chase circuit breaker
+
+# Local state
+TELEMETRY_FILE = Path("bot_telemetry.json")
+STATE_FILE = Path("hero_execution_state.json")
+
+active_trades: Dict[str, dict] = {}
+pending_setups: Dict[str, dict] = {}
+order_cooldown_tracker: Dict[str, float] = {}
+
+_last_scan_slot: Optional[str] = None
+
+
+# ============================================================
+# 3. JSON / state helpers
+# ============================================================
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if hasattr(value, "value") and not isinstance(value, (str, bytes)):
+        try:
+            return value.value
+        except Exception:
+            pass
+    return value
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as f:
+        json.dump(_json_safe(payload), f, indent=2)
+    os.replace(tmp, path)
+
+
+def record_telemetry(
+    ticker: str,
+    stage: str,
+    reason: str,
+    details: Optional[dict] = None,
+) -> None:
+    telemetry = {}
+    if TELEMETRY_FILE.exists():
+        try:
+            telemetry = json.loads(TELEMETRY_FILE.read_text())
+        except Exception:
+            telemetry = {}
+
+    telemetry[ticker] = {
+        "timestamp": datetime.now(EASTERN_TZ).isoformat(),
+        "stage": stage,
+        "reason": reason,
+        "details": details or {},
+    }
+
+    try:
+        _atomic_write_json(TELEMETRY_FILE, telemetry)
+    except Exception as exc:
+        print(f"⚠️ Telemetry write error: {exc}")
+
+
+def persist_execution_state() -> None:
+    payload = {
+        "saved_at": datetime.now(EASTERN_TZ).isoformat(),
+        "active_trades": active_trades,
+        "pending_setups": pending_setups,
+        "order_cooldown_tracker": order_cooldown_tracker,
+    }
+    try:
+        _atomic_write_json(STATE_FILE, payload)
+    except Exception as exc:
+        print(f"⚠️ State persistence error: {exc}")
+
+
+def load_execution_state() -> None:
+    global active_trades, pending_setups, order_cooldown_tracker
+
+    if not STATE_FILE.exists():
+        return
+
+    try:
+        payload = json.loads(STATE_FILE.read_text())
+        active_trades = payload.get("active_trades", {})
+        pending_setups = payload.get("pending_setups", {})
+        order_cooldown_tracker = {
+            str(k): float(v)
+            for k, v in payload.get("order_cooldown_tracker", {}).items()
+        }
+        print(
+            f"♻️ Restored HERO state: "
+            f"{len(active_trades)} active / {len(pending_setups)} pending."
+        )
+    except Exception as exc:
+        print(f"⚠️ Could not restore HERO state: {exc}")
+
+
+# ============================================================
+# 4. Time / dataframe hygiene
+# ============================================================
+
+def now_et() -> datetime:
+    return datetime.now(EASTERN_TZ)
+
+
+def _normalize_market_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = out.columns.get_level_values(0)
+
+    rename_map = {}
+    for col in out.columns:
+        low = str(col).strip().lower()
+        if low == "open":
+            rename_map[col] = "Open"
+        elif low == "high":
+            rename_map[col] = "High"
+        elif low == "low":
+            rename_map[col] = "Low"
+        elif low == "close":
+            rename_map[col] = "Close"
+        elif low == "volume":
+            rename_map[col] = "Volume"
+
+    out = out.rename(columns=rename_map)
+
+    required = {"Open", "High", "Low", "Close", "Volume"}
+    missing = required.difference(out.columns)
+    if missing:
+        raise ValueError(f"{symbol}: missing OHLCV columns: {sorted(missing)}")
+
+    if not isinstance(out.index, pd.DatetimeIndex):
+        raise TypeError(f"{symbol}: bars must use DatetimeIndex")
+
+    if out.index.tz is None:
+        if not NAIVE_BAR_SOURCE_TZ:
+            raise ValueError(
+                f"{symbol}: bar timestamps are timezone-naive. "
+                "Set HERO_NAIVE_BAR_TZ only after verifying the source timezone."
+            )
+        out.index = out.index.tz_localize(NAIVE_BAR_SOURCE_TZ)
+
+    out.index = out.index.tz_convert(EASTERN_TZ)
+    return out.sort_index()
+
+
+def _completed_bars(
+    df: pd.DataFrame,
+    minutes: int,
+    decision_ts: datetime,
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    ts = pd.Timestamp(decision_ts)
+
+    if BAR_LABEL == "start":
+        mask = (df.index + pd.Timedelta(minutes=minutes)) <= ts
+    else:
+        mask = df.index <= ts
+
+    return df.loc[mask].copy()
+
+
+def _regular_session(df: pd.DataFrame, session_date) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    start = pd.Timestamp(f"{session_date} 09:30:00", tz=EASTERN_TZ)
+    end = pd.Timestamp(f"{session_date} 16:00:00", tz=EASTERN_TZ)
+    return df[(df.index >= start) & (df.index < end)].copy()
+
+
+def _completion_age_seconds(
+    bar_ts: pd.Timestamp,
+    minutes: int,
+    decision_ts: datetime,
+) -> float:
+    completion = (
+        bar_ts + pd.Timedelta(minutes=minutes)
+        if BAR_LABEL == "start"
+        else bar_ts
+    )
+    return max(
+        0.0,
+        (pd.Timestamp(decision_ts) - completion).total_seconds(),
+    )
+
+
+# ============================================================
+# 5. Market / broker health
+# ============================================================
+
+def broker_market_is_open() -> bool:
+    if trading_client is None:
+        return False
+
+    try:
+        return bool(trading_client.get_clock().is_open)
+    except Exception as exc:
+        print(f"⚠️ Broker clock unavailable: {exc}")
+        return False
+
+
+def can_enter_new_trade(ticker: str) -> Tuple[bool, str]:
+    current = now_et()
+
+    if current.time() < FIRST_ENTRY_TIME:
+        return False, "ORB30_NOT_READY_FOR_POST_OPEN_ENTRY"
+
+    if current.time() >= ENTRY_CUTOFF_TIME:
+        return False, "PAST_ENTRY_CUTOFF"
+
+    if trading_client is None or option_data_client is None:
+        return False, "BROKER_OR_DATA_CLIENT_UNAVAILABLE"
+
+    # Capacity guard
+    if len(pending_setups) >= MAX_PENDING_SETUPS:
+        return False, f"MAX_PENDING_SETUPS_REACHED_{MAX_PENDING_SETUPS}"
+
+    last_order_ts = float(order_cooldown_tracker.get(ticker, 0.0))
+    elapsed = time.time() - last_order_ts
+
+    if elapsed < ORDER_MUTEX_SECONDS:
+        return False, f"ORDER_MUTEX_{ORDER_MUTEX_SECONDS - elapsed:.0f}S"
+
+    return True, "APPROVED"
+
+
+# ============================================================
+# 6. HERO feature engine — 5m tactical / 15m structural
+# ============================================================
+
+def _compute_atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    tr1 = df["High"] - df["Low"]
+    tr2 = (df["High"] - df["Close"].shift()).abs()
+    tr3 = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=window).mean()
+
+
+def fetch_underlying_features(
+    symbol: str,
+    decision_ts: Optional[datetime] = None,
+):
+    decision_ts = decision_ts or now_et()
+    session_date = decision_ts.date()
+
+    raw5 = safe_download(symbol, period=FIVE_MIN_PERIOD, interval="5m")
+    raw15 = safe_download(symbol, period=FIFTEEN_MIN_PERIOD, interval="15m")
+
+    df5 = _normalize_market_df(raw5, symbol)
+    df15 = _normalize_market_df(raw15, symbol)
+
+    if df5.empty or df15.empty:
+        return None
+
+    c5 = _completed_bars(df5, 5, decision_ts)
+    c15 = _completed_bars(df15, 15, decision_ts)
+
+    if len(c5) < 20 or len(c15) < 25:
+        return None
+
+    today5 = _regular_session(c5, session_date)
+    if today5.empty:
+        return None
+
+    latest5 = today5.iloc[-1]
+    latest5_ts = today5.index[-1]
+
+    five_age = _completion_age_seconds(latest5_ts, 5, decision_ts)
+    if five_age > MAX_5M_COMPLETION_AGE_SECONDS:
+        raise RuntimeError(f"{symbol}: stale 5m data ({five_age:.0f}s since expected completion)")
+
+    latest15_ts = c15.index[-1]
+    fifteen_age = _completion_age_seconds(latest15_ts, 15, decision_ts)
+    if fifteen_age > MAX_15M_COMPLETION_AGE_SECONDS:
+        raise RuntimeError(f"{symbol}: stale 15m context ({fifteen_age:.0f}s)")
+
+    c15 = c15.copy()
+    c15["EMA20"] = c15["Close"].ewm(span=20, adjust=False).mean()
+    c15["EMA20_Slope"] = c15["EMA20"] - c15["EMA20"].shift(1)
+    c15["ATR14"] = _compute_atr(c15, 14)
+
+    latest15 = c15.iloc[-1]
+    atr = float(latest15["ATR14"])
+
+    if not np.isfinite(atr) or atr <= 0:
+        return None
+
+    ema20 = float(latest15["EMA20"])
+    ema20_slope = float(latest15["EMA20_Slope"])
+
+    today5 = today5.copy()
+    typical = (today5["High"] + today5["Low"] + today5["Close"]) / 3.0
+    cum_vol = today5["Volume"].astype(float).cumsum()
+    cum_pv = (typical * today5["Volume"].astype(float)).cumsum()
+    today5["VWAP"] = cum_pv / cum_vol.replace(0, np.nan)
+    vwap = float(today5["VWAP"].iloc[-1])
+
+    orb = mmb.calculate_multi_orb(
+        df5,
+        session_date=session_date,
+        decision_ts=pd.Timestamp(decision_ts),
+        atr=atr,
+        bar_label=BAR_LABEL,
+    )
+
+    if not orb.orb30_locked:
+        return {
+            "orb_locked": False,
+            "multi_orb": orb,
+            "latest_5m_ts": latest5_ts.isoformat(),
+        }
+
+    if not np.isfinite(orb.orb30_high) or not np.isfinite(orb.orb30_low):
+        return None
+
+    try:
+        rvol = mmb.compute_same_clock_rvol(
+            df5,
+            latest5_ts,
+            lookback_sessions=RVOL_LOOKBACK_SESSIONS,
+        )
+    except Exception:
+        rvol = None
+
+    try:
+        width_ctx = mmb.compute_orb30_width_percentile(
+            df5,
+            current_session_date=session_date,
+            current_width=orb.orb30_width_dollars,
+            lookback_sessions=ORB_WIDTH_LOOKBACK_SESSIONS,
+        )
+    except Exception:
+        width_ctx = {
+            "percentile": float("nan"),
+            "sample_size": 0.0,
+            "historical_median": float("nan"),
+            "historical_mean": float("nan"),
+        }
+
+    try:
+        attempts = mmb.compute_breakout_attempt_state(
+            df5,
+            session_date=session_date,
+            decision_ts=pd.Timestamp(decision_ts),
+            orb_high=orb.orb30_high,
+            orb_low=orb.orb30_low,
+            bar_label=BAR_LABEL,
+        )
+    except Exception:
+        attempts = None
+
+    mechanics = mmb.classify_setup_candidate(
+        candle=latest5,
+        orb_high=orb.orb30_high,
+        orb_low=orb.orb30_low,
+        vwap=vwap,
+        ema20_slope=ema20_slope,
+        initial_r=atr,
+        recent_completed_bars=today5.tail(3),
+    )
+
+    anatomy = mechanics.get("anatomy", mmb.compute_bar_anatomy(latest5))
+
+    return {
+        "orb_locked": True,
+        "close": float(latest5["Close"]),
+        "vwap": vwap,
+        "ema20_15m": ema20,
+        "ema20_slope_15m": ema20_slope,
+        "atr_15m": atr,
+        "multi_orb": orb,
+        "orb_high": float(orb.orb30_high),
+        "orb_low": float(orb.orb30_low),
+        "orb_mid": float(orb.orb30_mid),
+        "orb_width_atr": float(orb.orb30_width_atr),
+        "orb_width_percentile": float(width_ctx.get("percentile", float("nan"))),
+        "latest_5m_ts": latest5_ts.isoformat(),
+        "latest_15m_ts": latest15_ts.isoformat(),
+        "five_min_age_seconds": five_age,
+        "fifteen_min_age_seconds": fifteen_age,
+        "body_pct": float(anatomy["body_pct"]),
+        "upper_wick_pct": float(anatomy["upper_wick_pct"]),
+        "lower_wick_pct": float(anatomy["lower_wick_pct"]),
+        "clv": float(anatomy["clv"]),
+        "close_location": float(anatomy["close_location"]),
+        "rvol": rvol,
+        "attempts": attempts,
+        "mechanics": mechanics,
+        "recent_5m": today5.tail(3).copy(),
+    }
+
+
+# ============================================================
+# 7. Setup routing / risk levels
+# ============================================================
+
+def build_trade_candidate(feat: dict) -> Optional[dict]:
+    if not feat.get("orb_locked"):
+        return None
+
+    spot = float(feat["close"])
+    vwap = float(feat["vwap"])
+    orb_h = float(feat["orb_high"])
+    orb_l = float(feat["orb_low"])
+    slope = float(feat["ema20_slope_15m"])
+    atr = float(feat["atr_15m"])
+
+    mechanics = feat.get("mechanics", {})
+    research_type = mechanics.get("setup_type", "IN_BALANCE_OR_UNCONFIRMED")
+    research_direction = mechanics.get("direction", "NONE")
+
+    if (
+        TRAP_EXECUTION_ENABLED
+        and research_type == "RESEARCH_BEAR_TRAP_RECLAIM"
+    ):
+        recent = feat["recent_5m"]
+        local_low = float(recent["Low"].min())
+        stop = local_low - (0.25 * atr)
+        target = orb_h
+        direction = "CALL"
+        setup_type = "BEAR_TRAP_RECLAIM"
+
+    elif (
+        TRAP_EXECUTION_ENABLED
+        and research_type == "RESEARCH_BULL_TRAP_REJECTION"
+    ):
+        recent = feat["recent_5m"]
+        local_high = float(recent["High"].max())
+        stop = local_high + (0.25 * atr)
+        target = orb_l
+        direction = "PUT"
+        setup_type = "BULL_TRAP_REJECTION"
+
+    elif spot > orb_h and spot > vwap and slope > 0:
+        direction = "CALL"
+        setup_type = "ORB30_BULL_BREAKOUT"
+        stop = spot - atr
+        target = spot + (2.0 * atr)
+
+    elif spot < orb_l and spot < vwap and slope < 0:
+        direction = "PUT"
+        setup_type = "ORB30_BEAR_BREAKDOWN"
+        stop = spot + atr
+        target = spot - (2.0 * atr)
+
+    else:
+        return None
+
+    initial_r = abs(spot - stop)
+    if not np.isfinite(initial_r) or initial_r <= 0:
+        return None
+
+    ext = mmb.compute_extension_r(
+        direction,
+        spot=spot,
+        orb_high=orb_h,
+        orb_low=orb_l,
+        initial_r=initial_r,
+    )
+
+    extension_r = float(ext["extension_r_post_break"])
+    signed_extension_r = float(ext["extension_r_signed"])
+
+    effective_rr = mmb.compute_effective_rr(
+        direction,
+        entry=spot,
+        stop=stop,
+        target=target,
+    )
+
+    return {
+        "setup_type": setup_type,
+        "direction": direction,
+        "entry_spot": spot,
+        "stop": float(stop),
+        "target": float(target),
+        "initial_r": float(initial_r),
+        "extension_r": extension_r,
+        "extension_r_signed": signed_extension_r,
+        "effective_rr": float(effective_rr),
+        "research_pattern": research_type,
+        "research_pattern_direction": research_direction,
+        "extension_tier": (
+            "TIER_3_EXTREME" if extension_r > HARD_EXTENSION_R_LIMIT
+            else "TIER_2_CAUTION" if extension_r > SOFT_EXTENSION_R_LIMIT
+            else "TIER_1_NORMAL"
+        ),
+    }
+
+
+# ============================================================
+# 8. Option selection
+# ============================================================
+
+def _enum_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(getattr(value, "value", value)).lower()
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        x = float(value)
+        return x if np.isfinite(x) else None
+    except Exception:
+        return None
+
+
+def _quote_age_seconds(quote: Any) -> Optional[float]:
+    ts = getattr(quote, "timestamp", None)
+    if ts is None:
+        return None
+    try:
+        qts = pd.Timestamp(ts)
+        if qts.tzinfo is None:
+            return None
+        return max(
+            0.0,
+            (pd.Timestamp(now_et()) - qts.tz_convert(EASTERN_TZ)).total_seconds(),
+        )
+    except Exception:
+        return None
+
+
+def compute_execution_score(delta: float, spread_pct: float) -> float:
+    spread_quality = max(
+        0.0,
+        min(1.0, 1.0 - (spread_pct / MAX_RELATIVE_SPREAD)),
+    )
+    delta_distance = abs(abs(delta) - TARGET_DELTA)
+    delta_quality = max(
+        0.0,
+        min(1.0, 1.0 - (delta_distance / DELTA_TOLERANCE)),
+    )
+    return 100.0 * ((0.60 * spread_quality) + (0.40 * delta_quality))
+
+
+def select_research_contract(
+    symbol: str,
+    spot: float,
+    contract_type: ContractType,
+) -> Optional[dict]:
+    if trading_client is None or option_data_client is None:
+        return None
+
+    today = now_et().date()
+    is_call = contract_type == ContractType.CALL
+
+    strike_min = spot * 0.95 if is_call else spot * 0.98
+    strike_max = spot * 1.02 if is_call else spot * 1.05
+
+    req = GetOptionContractsRequest(
+        underlying_symbols=[symbol],
+        status="active",
+        type=contract_type,
+        expiration_date_gte=today + timedelta(days=MIN_DTE),
+        expiration_date_lte=today + timedelta(days=MAX_DTE),
+        strike_price_gte=str(round(strike_min, 2)),
+        strike_price_lte=str(round(strike_max, 2)),
+        limit=100,
+    )
+
+    try:
+        response = trading_client.get_option_contracts(req)
+        contracts = list(getattr(response, "option_contracts", []) or [])
+        if not contracts:
+            return None
+
+        contract_symbols = [c.symbol for c in contracts]
+        snapshots = option_data_client.get_option_snapshot(
+            OptionSnapshotRequest(symbol_or_symbols=contract_symbols)
+        )
+
+        candidates = []
+        for contract in contracts:
+            snap = snapshots.get(contract.symbol)
+            if snap is None or getattr(snap, "latest_quote", None) is None:
+                continue
+
+            quote = snap.latest_quote
+            bid = _safe_float(getattr(quote, "bid_price", None))
+            ask = _safe_float(getattr(quote, "ask_price", None))
+
+            if bid is None or ask is None or bid <= MIN_OPTION_BID or ask <= bid:
+                continue
+
+            mid = (bid + ask) / 2.0
+            if mid <= 0:
+                continue
+
+            rel_spread = (ask - bid) / mid
+            if rel_spread > MAX_RELATIVE_SPREAD:
+                continue
+
+            greeks = getattr(snap, "greeks", None)
+            delta_raw = (
+                _safe_float(getattr(greeks, "delta", None))
+                if greeks else None
+            )
+            iv = _safe_float(getattr(snap, "implied_volatility", None))
+
+            if delta_raw is None:
+                if REQUIRE_BROKER_GREEKS:
+                    continue
+                continue
+
+            abs_delta = abs(delta_raw)
+            if abs(abs_delta - TARGET_DELTA) > DELTA_TOLERANCE:
+                continue
+
+            expiration = contract.expiration_date
+            dte = (expiration - today).days
+            if dte < MIN_DTE or dte > MAX_DTE:
+                continue
+
+            strike = float(contract.strike_price)
+            quote_age = _quote_age_seconds(quote)
+            exec_score = compute_execution_score(abs_delta, rel_spread)
+
+            candidates.append({
+                "symbol": contract.symbol,
+                "strike": strike,
+                "delta": abs_delta,
+                "raw_delta": delta_raw,
+                "iv": iv,
+                "bid": bid,
+                "ask": ask,
+                "mid": round(mid, 2),
+                "spread_pct": rel_spread,
+                "dte": dte,
+                "expiration": str(expiration),
+                "quote_age_seconds": quote_age,
+                "execution_score": exec_score,
+                "execution_score_version": "HEURISTIC_V1",
+            })
+
+        if not candidates:
+            return None
+
+        return min(
+            candidates,
+            key=lambda x: (abs(x["delta"] - TARGET_DELTA), x["spread_pct"]),
+        )
+
+    except Exception as exc:
+        print(f"⚠️ Contract selection error on {symbol}: {exc}")
+        return None
+
+
+# ============================================================
+# 9. Position sizing
+# ============================================================
+
+def estimate_option_loss_at_underlying_stop(
+    option_mid: float,
+    delta: float,
+    underlying_risk: float,
+) -> float:
+    premium_dollars = option_mid * 100.0
+    delta_loss = underlying_risk * 100.0 * abs(delta) * OPTION_STOP_RISK_BUFFER
+    if premium_dollars <= 0 or delta_loss <= 0:
+        return 0.0
+    return min(premium_dollars, delta_loss)
+
+
+def calculate_position_qty(
+    equity: float,
+    buying_power: float,
+    estimated_loss_per_contract: float,
+    option_mid: float,
+) -> int:
+    risk_budget = equity * RISK_PER_TRADE_PERCENT
+    if (
+        equity <= 0
+        or buying_power <= 0
+        or estimated_loss_per_contract <= 0
+        or option_mid <= 0
+    ):
+        return 0
+
+    qty_by_risk = math.floor(risk_budget / estimated_loss_per_contract)
+    qty_by_cash = math.floor(buying_power / (option_mid * 100.0))
+
+    qty = min(qty_by_risk, qty_by_cash, MAX_CONTRACTS_PER_TICKER)
+    return max(0, int(qty))
+
+
+# ============================================================
+# 10. VIC / alpha wrappers
+# ============================================================
+
+def safe_alpha_snapshot(ticker: str) -> Optional[dict]:
+    try:
+        info = ae.compute_alpha_score(ticker)
+        return info if isinstance(info, dict) else None
+    except Exception as exc:
+        print(f"⚠️ Alpha engine error on {ticker}: {exc}")
+        return None
+
+
+def safe_vic_clearance(
+    ticker: str,
+    direction: str,
+    spot: float,
+    stop: float,
+    target: float,
+) -> dict:
+    try:
+        result = mb.evaluate_macro_clearance(
+            ticker=ticker,
+            direction=direction,
+            spot_price=spot,
+            stop_price=stop,
+            target_price=target,
+        )
+        if not isinstance(result, dict):
+            raise ValueError("VIC returned non-dict response")
+        return result
+    except Exception as exc:
+        print(f"⚠️ VIC error on {ticker}: {exc}")
+        return {
+            "mode": "ENFORCE",
+            "verdict": "VETO",
+            "sizing_scalar": 0.0,
+            "reason_code": "VIC_DATA_OR_ENGINE_ERROR",
+            "reason": str(exc),
+            "obstacle_distance_r": float("nan"),
+            "data_timestamp_1h": "",
+            "data_timestamp_4h": "",
+        }
+
+
+# ============================================================
+# 11. LEARN logging
+# ============================================================
+
+def log_candidate_to_learn(
+    *,
+    ticker: str,
+    feat: dict,
+    trade: dict,
+    alpha_info: dict,
+    vic: dict,
+    contract: Optional[dict],
+    hero_decision: str,
+    final_state: str,
+    decision_code: str,
+    equity: float,
+    base_qty: int,
+    adjusted_qty: int,
+) -> None:
+    try:
+        bd = alpha_info.get("breakdown", {}) or {}
+        reg = alpha_info.get("regime_metrics", {}) or {}
+        rvol_obj = feat.get("rvol")
+
+        if rvol_obj is not None:
+            rvol_ratio = float(rvol_obj.ratio_mean)
+            rvol_percentile = float(rvol_obj.percentile)
+            rvol_zscore = float(rvol_obj.zscore)
+        else:
+            fallback = alpha_info.get("rvol_metrics", {}) or {}
+            rvol_ratio = float(fallback.get("ratio", 1.0))
+            rvol_percentile = float(fallback.get("percentile", 50.0))
+            rvol_zscore = float(fallback.get("zscore", 0.0))
+
+        orb = feat["multi_orb"]
+        assigned_sector = SECTOR_MAP.get(ticker, reg.get("sector_etf", "SPY"))
+
+        rec = lt.create_candidate_record(
+            ticker=ticker,
+            direction=trade["direction"],
+            spot=trade["entry_spot"],
+            orb_high=feat["orb_high"],
+            orb_low=feat["orb_low"],
+            vwap=feat["vwap"],
+            ema20_15m=feat["ema20_15m"],
+            ema20_slope_15m=feat["ema20_slope_15m"],
+            atr_15m=feat["atr_15m"],
+            rvol_ratio=rvol_ratio,
+            rvol_percentile=rvol_percentile,
+            rvol_zscore=rvol_zscore,
+            rs_market=reg.get("rs_market", 0.0),
+            rs_sector=reg.get("rs_sector", 0.0),
+            sector_etf=assigned_sector,
+            breakout_body_pct=feat["body_pct"],
+            close_location_val=feat["close_location"],
+            compression_score=bd.get("compression", 0.0),
+            hero_alpha_score=float(alpha_info.get("alpha_score", 0.0)),
+            hero_decision=hero_decision,
+            hero_reason_code=decision_code,
+            vic_verdict=vic.get("verdict", "UNKNOWN"),
+            vic_sizing_scalar=float(vic.get("sizing_scalar", 0.0)),
+            vic_reason_code=vic.get("reason_code", "UNKNOWN"),
+            vic_obstacle_distance_r=vic.get("obstacle_distance_r", float("nan")),
+            contract_symbol=contract["symbol"] if contract else "NONE",
+            strike=contract["strike"] if contract else 0.0,
+            expiration=contract["expiration"] if contract else "",
+            dte=contract["dte"] if contract else 0,
+            delta=contract["delta"] if contract else 0.0,
+            bid=contract["bid"] if contract else 0.0,
+            ask=contract["ask"] if contract else 0.0,
+            mid=contract["mid"] if contract else 0.0,
+            spread_pct=contract["spread_pct"] * 100.0 if contract else 0.0,
+            execution_score=contract["execution_score"] if contract else 0.0,
+            final_state=final_state,
+            decision_code=decision_code,
+            risk_budget_dollars=equity * RISK_PER_TRADE_PERCENT,
+            base_qty=base_qty,
+            vic_adjusted_qty=adjusted_qty,
+            orb5_high=orb.orb5_high,
+            orb5_low=orb.orb5_low,
+            orb15_high=orb.orb15_high,
+            orb15_low=orb.orb15_low,
+            accepted_or_high=orb.accepted_or_high,
+            accepted_or_low=orb.accepted_or_low,
+            extension_r=trade["extension_r"],
+            pattern_setup=trade["setup_type"],
+            is_trap="TRAP" in trade["setup_type"],
+        )
+        lt.append_candidate_to_log(rec)
+
+    except Exception as exc:
+        print(f"⚠️ LEARN tracking error on {ticker}: {exc}")
+
+
+# ============================================================
+# 12. Order-state helpers
+# ============================================================
+
+def hero_client_order_id(ticker: str, direction: str) -> str:
+    stamp = now_et().strftime("%Y%m%d%H%M%S")
+    suffix = uuid.uuid4().hex[:6]
+    return f"HERO-{ticker}-{direction}-{stamp}-{suffix}"[:48]
+
+
+def cancel_pending_order(setup: dict) -> None:
+    if trading_client is None:
+        return
+    order_id = setup.get("order_id")
+    if not order_id:
+        return
+    try:
+        trading_client.cancel_order_by_id(order_id)
+    except Exception:
+        pass
+
+
+def _broker_order_status(order_id: str) -> Optional[dict]:
+    if trading_client is None or not order_id:
+        return None
+    try:
+        order = trading_client.get_order_by_id(order_id)
+        return {
+            "status": _enum_value(getattr(order, "status", "")),
+            "filled_qty": float(getattr(order, "filled_qty", 0) or 0),
+            "filled_avg_price": _safe_float(getattr(order, "filled_avg_price", None)),
+        }
+    except Exception as exc:
+        print(f"⚠️ Could not query order {order_id}: {exc}")
+        return None
+
+
+def _broker_position_map() -> Dict[str, Any]:
+    if trading_client is None:
+        return {}
+    try:
+        return {p.symbol: p for p in trading_client.get_all_positions()}
+    except Exception as exc:
+        print(f"⚠️ Position query error: {exc}")
+        return {}
+
+
+def reconcile_execution_state() -> None:
+    if trading_client is None:
+        return
+
+    positions = _broker_position_map()
+
+    for ticker in list(active_trades):
+        contract = active_trades[ticker].get("contract")
+        if contract and contract not in positions:
+            record_telemetry(
+                ticker,
+                "STATE_RECONCILED",
+                "Local active trade removed because broker position is absent.",
+            )
+            del active_trades[ticker]
+
+    for ticker in list(pending_setups):
+        setup = pending_setups[ticker]
+        order_id = setup.get("order_id")
+        contract = setup.get("contract")
+
+        status = _broker_order_status(order_id) if order_id else None
+        if status is None:
+            continue
+
+        order_status = status["status"]
+        if order_status in {"canceled", "cancelled", "expired", "rejected"}:
+            record_telemetry(
+                ticker,
+                "ORDER_TERMINAL",
+                f"Broker order state = {order_status}",
+            )
+            del pending_setups[ticker]
+            continue
+
+        if status["filled_qty"] > 0 and contract in positions:
+            pos = positions[contract]
+            trade = dict(setup)
+            trade["qty"] = float(getattr(pos, "qty", status["filled_qty"]))
+            trade["avg_entry"] = float(
+                getattr(pos, "avg_entry_price", status["filled_avg_price"] or setup["entry_mid"])
+            )
+            trade["status"] = "FILLED" if order_status == "filled" else "PARTIAL"
+
+            active_trades[ticker] = trade
+            if order_status == "filled":
+                del pending_setups[ticker]
+
+    persist_execution_state()
+
+
+# ============================================================
+# 13. Pending setup revalidation — 5m bar clock
+# ============================================================
+
+def revalidate_pending_setup(ticker: str, setup: dict) -> dict:
+    if setup.get("status") not in {"SUBMITTED", "PARTIAL"}:
+        return setup
+
+    try:
+        feat = fetch_underlying_features(ticker)
+    except Exception as exc:
+        setup["audit_reason"] = f"REVALIDATION_DATA_ERROR: {exc}"
+        return setup
+
+    if not feat or not feat.get("orb_locked"):
+        return setup
+
+    latest_bar_ts = feat["latest_5m_ts"]
+    previous_bar_ts = setup.get("last_revalidation_bar_ts")
+
+    if latest_bar_ts == previous_bar_ts:
+        return setup
+
+    setup["last_revalidation_bar_ts"] = latest_bar_ts
+    setup["bars_elapsed"] = int(setup.get("bars_elapsed", 0)) + 1
+
+    close = float(feat["close"])
+    direction = setup["direction"]
+    setup_type = setup["setup_type"]
+    orb_high = float(setup["orb_high"])
+    orb_low = float(setup["orb_low"])
+
+    if direction == "CALL":
+        if "BREAKOUT" in setup_type and close < orb_high:
+            setup["status"] = "DISARMED"
+            setup["audit_reason"] = f"Bullish rejection: close ${close:.2f} back below ORB High"
+            return setup
+
+    if direction == "PUT":
+        if "BREAKDOWN" in setup_type and close > orb_low:
+            setup["status"] = "DISARMED"
+            setup["audit_reason"] = f"Bearish rejection: close ${close:.2f} back above ORB Low"
+            return setup
+
+    if setup["bars_elapsed"] >= PENDING_TTL_5M_BARS:
+        setup["status"] = "EXPIRED"
+        setup["audit_reason"] = f"Unfilled after {setup['bars_elapsed']} completed 5m bars."
+
+    return setup
+
+
+# ============================================================
+# 14. HERO-only risk management / EOD
+# ============================================================
+
+def close_hero_contract(ticker: str, trade: dict, reason: str) -> None:
+    if trading_client is None:
+        return
+    cancel_pending_order(trade)
+    contract = trade.get("contract")
+    if not contract:
+        return
+
+    try:
+        trading_client.close_position(contract)
+        record_telemetry(ticker, "CLOSE_SUBMITTED", reason, {"contract": contract})
+    except Exception as exc:
+        print(f"⚠️ Close error for {ticker}/{contract}: {exc}")
+
+
+def flatten_hero_only() -> None:
+    for ticker, setup in list(pending_setups.items()):
+        cancel_pending_order(setup)
+        record_telemetry(ticker, "EOD_CANCEL", "HERO pending order canceled at 15:45 ET.")
+
+    contracts_to_close = {}
+    for ticker, trade in active_trades.items():
+        contract = trade.get("contract")
+        if contract:
+            contracts_to_close[contract] = (ticker, trade)
+
+    for ticker, setup in pending_setups.items():
+        contract = setup.get("contract")
+        if contract and setup.get("status") == "PARTIAL":
+            contracts_to_close.setdefault(contract, (ticker, setup))
+
+    for contract, (ticker, trade) in contracts_to_close.items():
+        try:
+            trading_client.close_position(contract)
+            record_telemetry(ticker, "EOD_FLATTEN_SUBMITTED", f"HERO-only flatten for {contract}.")
+        except Exception as exc:
+            print(f"⚠️ EOD flatten error for {ticker}/{contract}: {exc}")
+
+    pending_setups.clear()
+    active_trades.clear()
+    persist_execution_state()
+
+
+def run_continuous_risk_loop() -> None:
+    current = now_et()
+
+    if current.time() >= FLATTEN_TIME:
+        if active_trades or pending_setups:
+            print("🛑 HERO EOD cutoff reached. Flattening HERO-owned exposure only.")
+            flatten_hero_only()
+        return
+
+    positions = _broker_position_map()
+
+    # Broker-authoritative pending state check
+    for ticker in list(pending_setups):
+        setup = pending_setups[ticker]
+        order_id = setup.get("order_id")
+        contract = setup.get("contract")
+
+        status = _broker_order_status(order_id) if order_id else None
+        if status is not None:
+            broker_status = status["status"]
+            if broker_status in {"rejected", "canceled", "cancelled", "expired"}:
+                record_telemetry(ticker, "ORDER_TERMINAL", f"Broker order status = {broker_status}")
+                del pending_setups[ticker]
+                persist_execution_state()
+                continue
+
+            if status["filled_qty"] > 0 and contract in positions:
+                position = positions[contract]
+                trade = dict(setup)
+                trade["qty"] = float(getattr(position, "qty", status["filled_qty"]))
+                trade["avg_entry"] = float(
+                    getattr(position, "avg_entry_price", status["filled_avg_price"] or setup["entry_mid"])
+                )
+
+                if broker_status == "filled":
+                    trade["status"] = "FILLED"
+                    active_trades[ticker] = trade
+                    del pending_setups[ticker]
+                    record_telemetry(
+                        ticker,
+                        "FILLED",
+                        f"Filled {trade['qty']} @ ${trade['avg_entry']:.2f}",
+                        {"contract": contract, "stop": trade["stop"], "target": trade["target"]},
+                    )
+                    persist_execution_state()
+                else:
+                    setup["status"] = "PARTIAL"
+                    active_trades[ticker] = trade
+                    record_telemetry(
+                        ticker,
+                        "PARTIAL",
+                        f"Partial fill {status['filled_qty']} contracts.",
+                        {"contract": contract},
+                    )
+
+        if ticker in pending_setups:
+            updated = revalidate_pending_setup(ticker, pending_setups[ticker])
+            pending_setups[ticker] = updated
+            if updated.get("status") in {"DISARMED", "EXPIRED"}:
+                cancel_pending_order(updated)
+                record_telemetry(
+                    ticker,
+                    updated["status"],
+                    updated.get("audit_reason", "Pending setup invalidated."),
+                )
+                del pending_setups[ticker]
+                persist_execution_state()
+
+    # 10-second underlying stop/target management
+    for ticker in list(active_trades):
+        trade = active_trades[ticker]
+        try:
+            current_spot = float(safe_fast_price(ticker))
+        except Exception as exc:
+            print(f"⚠️ Fast-price error on {ticker}: {exc}")
+            continue
+
+        if not np.isfinite(current_spot) or current_spot <= 0:
+            continue
+
+        direction = trade["direction"]
+        stop = float(trade["stop"])
+        target = float(trade["target"])
+
+        hit_stop = current_spot <= stop if direction == "CALL" else current_spot >= stop
+        hit_target = current_spot >= target if direction == "CALL" else current_spot <= target
+
+        record_telemetry(
+            ticker,
+            "MANAGING",
+            f"Spot ${current_spot:.2f}",
+            {"contract": trade["contract"], "stop": stop, "target": target, "direction": direction},
+        )
+
+        if not (hit_stop or hit_target):
+            continue
+
+        entry_spot = float(trade["entry_spot"])
+        initial_r = float(trade["initial_r"])
+        result_r = ((current_spot - entry_spot) if direction == "CALL" else (entry_spot - current_spot)) / initial_r
+        event = "TARGET_HIT" if hit_target else "STOP_HIT"
+
+        pending = pending_setups.get(ticker)
+        if pending:
+            cancel_pending_order(pending)
+            pending_setups.pop(ticker, None)
+
+        close_hero_contract(
+            ticker,
+            trade,
+            f"{event} at underlying ${current_spot:.2f}; underlying result ≈ {result_r:+.2f}R",
+        )
+        active_trades.pop(ticker, None)
+        persist_execution_state()
+
+
+# ============================================================
+# 15. Scan / decision pipeline
+# ============================================================
+
+def scan_alpha_signals() -> None:
+    current = now_et()
+
+    if current.time() < FIRST_ENTRY_TIME:
+        return
+
+    if current.time() >= ENTRY_CUTOFF_TIME:
+        print("⏸️ Entry cutoff reached. No new HERO setups.")
+        return
+
+    if not broker_market_is_open():
+        print("⏸️ Broker reports market closed/unavailable. No new entries.")
+        return
+
+    print(
+        "\n========================================================\n"
+        f"📈 HERO-5 Scan: {current.strftime('%Y-%m-%d %H:%M:%S ET')}\n"
+        "========================================================"
+    )
+
+    if trading_client is None:
+        return
+
+    try:
+        account = trading_client.get_account()
+        equity = float(account.equity)
+        buying_power = float(account.buying_power)
+    except Exception as exc:
+        print(f"⚠️ Account query failed: {exc}")
+        return
+
+    owned_names = set(active_trades) | set(pending_setups)
+    if len(owned_names) >= MAX_CONCURRENT_HERO_NAMES:
+        print(f"⚪ HERO capacity reached: {len(owned_names)}/{MAX_CONCURRENT_HERO_NAMES}")
+        return
+
+    broker_positions = _broker_position_map()
+
+    for ticker in UNIVERSE:
+        if ticker in active_trades or ticker in pending_setups:
+            continue
+
+        if len(set(active_trades) | set(pending_setups)) >= MAX_CONCURRENT_HERO_NAMES:
+            break
+
+        try:
+            feat = fetch_underlying_features(ticker, current)
+        except Exception as exc:
+            record_telemetry(ticker, "BLOCKED_DATA", str(exc))
+            continue
+
+        if not feat or not feat.get("orb_locked"):
+            continue
+
+        trade = build_trade_candidate(feat)
+        mechanics = feat.get("mechanics", {})
+
+        if trade is None:
+            record_telemetry(
+                ticker,
+                "SCANNING",
+                f"No production setup. Research pattern: {mechanics.get('setup_type', 'NONE')}",
+                {"orb_high": feat["orb_high"], "orb_low": feat["orb_low"], "vwap": feat["vwap"]},
+            )
+            continue
+
+        alpha_info = safe_alpha_snapshot(ticker)
+        if alpha_info is None:
+            record_telemetry(ticker, "BLOCKED_ALPHA", "Alpha engine unavailable.")
+            continue
+
+        alpha_score = float(alpha_info.get("alpha_score", 0.0))
+
+        vic = safe_vic_clearance(
+            ticker=ticker,
+            direction=trade["direction"],
+            spot=trade["entry_spot"],
+            stop=trade["stop"],
+            target=trade["target"],
+        )
+
+        vic_mode = str(vic.get("mode", "ENFORCE")).upper()
+        vic_verdict = str(vic.get("verdict", "VETO")).upper()
+        vic_scalar = float(vic.get("sizing_scalar", 0.0))
+
+        contract_type = ContractType.CALL if trade["direction"] == "CALL" else ContractType.PUT
+        contract = select_research_contract(ticker, trade["entry_spot"], contract_type)
+
+        can_enter, entry_reason = can_enter_new_trade(ticker)
+        base_qty = 0
+        qty = 0
+
+        if contract is not None:
+            estimated_loss = estimate_option_loss_at_underlying_stop(
+                option_mid=contract["mid"],
+                delta=contract["delta"],
+                underlying_risk=trade["initial_r"],
+            )
+            base_qty = calculate_position_qty(
+                equity=equity,
+                buying_power=buying_power,
+                estimated_loss_per_contract=estimated_loss,
+                option_mid=contract["mid"],
+            )
+            scalar = vic_scalar if vic_mode == "ENFORCE" else 1.0
+            qty = math.floor(base_qty * max(0.0, scalar))
+
+        # ----------------------------------------------------
+        # 3-Tier Extension Policy & Gating
+        # ----------------------------------------------------
+        ext_r = float(trade["extension_r"])
+
+        # Tier 3 (> 2.0R): Extreme Exhaustion Circuit Breaker
+        if ext_r > HARD_EXTENSION_R_LIMIT:
+            final_state = "REJECTED"
+            hero_decision = "REJECT"
+            decision_code = f"EXTREME_CHASE_CIRCUIT_BREAKER_{ext_r:.2f}R"
+            print(f"🚫 {ticker} {trade['direction']} REJECTED: Extreme extension {ext_r:.2f}R > {HARD_EXTENSION_R_LIMIT:.2f}R")
+
+            log_candidate_to_learn(
+                ticker=ticker,
+                feat=feat,
+                trade=trade,
+                alpha_info=alpha_info,
+                vic=vic,
+                contract=contract,
+                hero_decision=hero_decision,
+                final_state=final_state,
+                decision_code=decision_code,
+                equity=equity,
+                base_qty=base_qty,
+                adjusted_qty=0,
+            )
+            record_telemetry(ticker, final_state, decision_code, {"extension_r": ext_r})
+            continue
+
+        # Tier 2 (1.0R - 2.0R): Cautionary Research Window (Counterfactual in LEARN)
+        elif ext_r > SOFT_EXTENSION_R_LIMIT:
+            final_state = "SHADOW_RESEARCH"
+            hero_decision = "SHADOW_OBSERVE"
+            decision_code = f"EXTENSION_CAUTION_SHADOW_{ext_r:.2f}R"
+            print(f"🧪 {ticker} {trade['direction']} SHADOW: Extension {ext_r:.2f}R in research zone (1.0-2.0R). Logged to LEARN.")
+
+            log_candidate_to_learn(
+                ticker=ticker,
+                feat=feat,
+                trade=trade,
+                alpha_info=alpha_info,
+                vic=vic,
+                contract=contract,
+                hero_decision=hero_decision,
+                final_state=final_state,
+                decision_code=decision_code,
+                equity=equity,
+                base_qty=base_qty,
+                adjusted_qty=0,
+            )
+            record_telemetry(ticker, final_state, decision_code, {"extension_r": ext_r})
+            continue
+
+        # Tier 1 (<= 1.0R): Standard Gating
+        if vic_mode == "ENFORCE" and vic_verdict == "VETO":
+            final_state = "VETOED"
+            hero_decision = "APPROVE"
+            decision_code = f"VIC_VETO_{vic.get('reason_code', 'UNKNOWN')}"
+
+        elif alpha_score < ALPHA_MIN_SCORE:
+            final_state = "REJECTED"
+            hero_decision = "REJECT"
+            decision_code = f"ALPHA_BELOW_{ALPHA_MIN_SCORE:.0f}"
+
+        elif not can_enter:
+            final_state = "BLOCKED"
+            hero_decision = "APPROVE"
+            decision_code = entry_reason
+
+        elif contract is None:
+            final_state = "BLOCKED"
+            hero_decision = "APPROVE"
+            decision_code = "NO_ELIGIBLE_OPTION_CONTRACT"
+
+        elif contract["symbol"] in broker_positions:
+            final_state = "BLOCKED"
+            hero_decision = "APPROVE"
+            decision_code = "EXACT_CONTRACT_ALREADY_HELD"
+
+        elif qty < 1:
+            final_state = "BLOCKED"
+            hero_decision = "APPROVE"
+            decision_code = "RISK_OR_BUYING_POWER_BELOW_ONE_CONTRACT"
+
+        else:
+            final_state = "ARMED"
+            hero_decision = "APPROVE"
+            decision_code = "ALL_GATES_PASSED"
+
+        # Log primary candidate outcome to LEARN
+        log_candidate_to_learn(
+            ticker=ticker,
+            feat=feat,
+            trade=trade,
+            alpha_info=alpha_info,
+            vic=vic,
+            contract=contract,
+            hero_decision=hero_decision,
+            final_state=final_state,
+            decision_code=decision_code,
+            equity=equity,
+            base_qty=base_qty,
+            adjusted_qty=qty,
+        )
+
+        if final_state != "ARMED":
+            record_telemetry(
+                ticker,
+                final_state,
+                decision_code,
+                {
+                    "alpha": alpha_score,
+                    "extension_r": trade["extension_r"],
+                    "effective_rr": trade["effective_rr"],
+                    "orb_width_percentile": feat["orb_width_percentile"],
+                },
+            )
+            continue
+
+        client_id = hero_client_order_id(ticker, trade["direction"])
+
+        try:
+            request = LimitOrderRequest(
+                symbol=contract["symbol"],
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+                limit_price=contract["mid"],
+                client_order_id=client_id,
+            )
+            response = trading_client.submit_order(request)
+        except Exception as exc:
+            record_telemetry(ticker, "ORDER_ERROR", str(exc), {"contract": contract["symbol"]})
+            print(f"⚠️ Order submission error for {ticker}: {exc}")
+            continue
+
+        order_id = str(response.id)
+        order_cooldown_tracker[ticker] = time.time()
+
+        pending_setups[ticker] = {
+            "contract": contract["symbol"],
+            "direction": trade["direction"],
+            "setup_type": trade["setup_type"],
+            "research_pattern": trade["research_pattern"],
+            "entry_spot": trade["entry_spot"],
+            "entry_mid": contract["mid"],
+            "stop": trade["stop"],
+            "target": trade["target"],
+            "initial_r": trade["initial_r"],
+            "extension_r": trade["extension_r"],
+            "effective_rr": trade["effective_rr"],
+            "orb_high": feat["orb_high"],
+            "orb_low": feat["orb_low"],
+            "atr": feat["atr_15m"],
+            "alpha_score": alpha_score,
+            "execution_score": contract["execution_score"],
+            "execution_score_version": contract["execution_score_version"],
+            "dte": contract["dte"],
+            "delta": contract["delta"],
+            "iv": contract["iv"],
+            "spread_pct": contract["spread_pct"] * 100.0,
+            "order_id": order_id,
+            "client_order_id": client_id,
+            "status": "SUBMITTED",
+            "bars_elapsed": 0,
+            "last_revalidation_bar_ts": feat["latest_5m_ts"],
+            "signal_created_at": current.isoformat(),
+            "vic_verdict": vic_verdict,
+            "vic_mode": vic_mode,
+            "vic_sizing_scalar": vic_scalar,
+            "vic_reason_code": vic.get("reason_code", "UNKNOWN"),
+            "vic_reason": vic.get("reason", ""),
+            "vic_obstacle_dist_r": vic.get("obstacle_distance_r", float("nan")),
+            "vic_1h_bar_ts": vic.get("data_timestamp_1h", ""),
+            "vic_4h_bar_ts": vic.get("data_timestamp_4h", ""),
+        }
+
+        persist_execution_state()
+
+        record_telemetry(
+            ticker,
+            "SUBMITTED",
+            f"{trade['setup_type']} | Alpha {alpha_score:.0f} | Ext {trade['extension_r']:.2f}R",
+            {
+                "contract": contract["symbol"],
+                "qty": qty,
+                "delta": contract["delta"],
+                "iv": contract["iv"],
+                "mid": contract["mid"],
+                "execution_score": contract["execution_score"],
+                "stop": trade["stop"],
+                "target": trade["target"],
+                "client_order_id": client_id,
+            },
+        )
+
+        print(
+            f"⚡ {ticker} {trade['direction']} | {trade['setup_type']} | "
+            f"Spot ${trade['entry_spot']:.2f} | Alpha {alpha_score:.0f} | Ext {trade['extension_r']:.2f}R\n"
+            f"   {contract['symbol']} | Δ {contract['delta']:.2f} | Mid ${contract['mid']:.2f} | "
+            f"Spread {contract['spread_pct'] * 100:.1f}% | Qty {qty}"
+        )
+
+
+# ============================================================
+# 16. Scheduler
+# ============================================================
+
+def _scan_slot_key(current: datetime) -> str:
+    rounded_minute = (current.minute // 5) * 5
+    slot = current.replace(minute=rounded_minute, second=0, microsecond=0)
+    return slot.isoformat()
+
+
+def should_run_5m_scan(current: datetime) -> bool:
+    global _last_scan_slot
+    if current.minute % 5 != 0:
+        return False
+    if current.second < SCAN_DELAY_SECONDS:
+        return False
+    if current.second > SCAN_DELAY_SECONDS + 20:
+        return False
+
+    slot = _scan_slot_key(current)
+    if slot == _last_scan_slot:
+        return False
+
+    _last_scan_slot = slot
+    return True
+
+
+# ============================================================
+# 17. Main
+# ============================================================
+
+def main() -> None:
+    print("🤖 HERO Clean V2 — Paper Execution Engine")
+    print("🏛️ VIC Macro Governor: enabled")
+    print("🧪 LEARN candidate telemetry: enabled")
+    print("⏱️ 30m ORB + 15m context + completed 5m tactical trigger")
+    print(f"🧠 Trap execution: {'ENFORCE' if TRAP_EXECUTION_ENABLED else 'SHADOW'}")
+    print(f"📏 Extension Policy: Tier 1 (<= {SOFT_EXTENSION_R_LIMIT:.2f}R Active) | Tier 2 ({SOFT_EXTENSION_R_LIMIT:.2f}-{HARD_EXTENSION_R_LIMIT:.2f}R Shadow) | Tier 3 (> {HARD_EXTENSION_R_LIMIT:.2f}R Block)")
+    print(f"📦 Capacity: Max {MAX_CONCURRENT_HERO_NAMES} Active / {MAX_PENDING_SETUPS} Pending")
+
+    load_execution_state()
+
+    if trading_client is not None:
+        reconcile_execution_state()
+
+    while True:
+        try:
+            current = now_et()
+
+            if broker_market_is_open():
+                run_continuous_risk_loop()
+
+                if should_run_5m_scan(current):
+                    scan_alpha_signals()
+
+                time.sleep(RISK_LOOP_SECONDS)
+                continue
+
+            print("\n🌙 Market closed / broker clock unavailable. Standby...")
+            time.sleep(120)
+
+        except KeyboardInterrupt:
+            print("\n🛑 HERO terminated by user.")
+            persist_execution_state()
+            break
+
+        except Exception as exc:
+            print(f"⚠️ Main loop error: {exc}")
+            persist_execution_state()
+            time.sleep(15)
+
+
+if __name__ == "__main__":
+    main()

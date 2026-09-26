@@ -1,0 +1,640 @@
+[
+  {
+    "path": "ai_manager.py",
+    "sha256": "95dcdb47ed6e4cb71510a4745de3baa32bac490ae5cef506036a434af21b0fc0",
+    "lines": 128,
+    "imports": [
+      "import os",
+      "from datetime import datetime",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "from dotenv import load_dotenv"
+    ]
+  },
+  {
+    "path": "learn_tracker.py",
+    "sha256": "3fe028c736587e8df250dfb637bd89d0952a896e901ba2e3385bbb2a0379f2f2",
+    "lines": 467,
+    "imports": [
+      "from datetime import datetime",
+      "import json",
+      "import os",
+      "import uuid",
+      "from zoneinfo import ZoneInfo",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "holly_engine.py",
+    "sha256": "122e994e5b63fdf45ad29a20ef4b296f22f6d2a14e67cc6b7e798670a41aa3ea",
+    "lines": 204,
+    "imports": [
+      "import os",
+      "from datetime import datetime",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "import alpha_engine as ae",
+      "import market_barometer as mb",
+      "import option_engine as oe",
+      "import research_logger as rl",
+      "import rvol_engine as re"
+    ]
+  },
+  {
+    "path": "economic_calendar.py",
+    "sha256": "32f4c123b30b5f3d6c51b8f111aacf56f8da757bb7b58e07d6648609c2ce0989",
+    "lines": 67,
+    "imports": [
+      "import datetime",
+      "import yfinance as yf",
+      "import pandas as pd"
+    ]
+  },
+  {
+    "path": "desk_report_cards.py",
+    "sha256": "f45d1de967b5f17055dcfdef24a21f96c285fdbe5605295f042738c800e0cf29",
+    "lines": 114,
+    "imports": [
+      "import os",
+      "import pandas as pd",
+      "import numpy as np",
+      "import learn_tracker as lt"
+    ]
+  },
+  {
+    "path": "market_intelligence.py",
+    "sha256": "351288a321be4b86066a0a93c2aa30d0d20b37d04cd9c6b6500e1f21eee2c1c4",
+    "lines": 85,
+    "imports": [
+      "import pandas as pd",
+      "import pandas_ta as ta",
+      "from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "resolve_daily_candidates.py",
+    "sha256": "f27e6325abce7a95817a8a067fc543faf90b37a23c0906dd7f77a706f2d9510e",
+    "lines": 80,
+    "imports": [
+      "from datetime import datetime",
+      "import json",
+      "import os",
+      "from zoneinfo import ZoneInfo",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "import learn_tracker as lt"
+    ]
+  },
+  {
+    "path": "buy_tesla.py",
+    "sha256": "e94d1d3802c7fcfda53459a3fad7b480fdbdc62bb4cf80773447a98e00dbaa0e",
+    "lines": 100,
+    "imports": [
+      "import os",
+      "from dotenv import load_dotenv",
+      "from alpaca.trading.client import TradingClient",
+      "import yfinance as yf",
+      "import pandas as pd",
+      "import numpy as np"
+    ]
+  },
+  {
+    "path": "rvol_engine.py",
+    "sha256": "47c393fbed0f1fec901824d2b635b5cd13dcfef3d02b5a915da83b0f3c0c43f4",
+    "lines": 104,
+    "imports": [
+      "import pandas as pd",
+      "import numpy as np",
+      "import yfinance as yf",
+      "from datetime import datetime",
+      "from zoneinfo import ZoneInfo"
+    ]
+  },
+  {
+    "path": "market_check.py",
+    "sha256": "3fa7bdb9eb68e0392042928d30ca2efed2a7af08231350fe5b2904214d7a404e",
+    "lines": 31,
+    "imports": [
+      "import pandas as pd",
+      "import yfinance as yf",
+      "import pandas_ta as ta"
+    ]
+  },
+  {
+    "path": "research_logger.py",
+    "sha256": "69210ad590ef2f678c94988471feb3b97e3fc4d15b03479b94849e3933e4fa1c",
+    "lines": 183,
+    "imports": [
+      "from datetime import datetime",
+      "import json",
+      "import os",
+      "from typing import Any, Dict, Optional",
+      "import pandas as pd"
+    ]
+  },
+  {
+    "path": "test_crypto.py",
+    "sha256": "340a3663bef5f7d15e22e01e3333e831e599482ad26b7ea92fc3ab9e8203a49b",
+    "lines": 27,
+    "imports": [
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.enums import OrderSide, TimeInForce",
+      "from alpaca.trading.requests import MarketOrderRequest"
+    ]
+  },
+  {
+    "path": "fundamental_engine.py",
+    "sha256": "4c8abe9da0b39df93f31242b5d11ab7c4d6c379b5f5fff79b1867b714cf9914c",
+    "lines": 285,
+    "imports": [
+      "from datetime import datetime",
+      "import numpy as np",
+      "import pandas as pd",
+      "import streamlit as st",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "safe_yf.py",
+    "sha256": "648ea4cac7e1874b1de67c41f01eb5bbce173ac197c0727853161f795d8905db",
+    "lines": 76,
+    "imports": [
+      "import time",
+      "from datetime import datetime",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "watchlist_scanner.py",
+    "sha256": "872606eeeb870ec15ce235c258bbd0035a1aa866d649a1aa9dd2bde5e9f01093",
+    "lines": 215,
+    "imports": [
+      "import os",
+      "import time",
+      "from datetime import date, datetime, timedelta",
+      "from dotenv import load_dotenv",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.enums import ContractType, OrderSide, TimeInForce",
+      "from alpaca.trading.requests import GetOptionContractsRequest, MarketOrderRequest"
+    ]
+  },
+  {
+    "path": "research_momentum_bot.py",
+    "sha256": "f1cab33390dbd3ef7ce0d2311699f63a5ad10ba73cb19a96da482e83000706ad",
+    "lines": 1707,
+    "imports": [
+      "from __future__ import annotations",
+      "from datetime import datetime, time as dtime, timedelta",
+      "import json",
+      "import math",
+      "import os",
+      "import time",
+      "import uuid",
+      "from pathlib import Path",
+      "from typing import Any, Dict, Optional, Tuple",
+      "from zoneinfo import ZoneInfo",
+      "import numpy as np",
+      "import pandas as pd",
+      "from dotenv import load_dotenv",
+      "from safe_yf import safe_download, safe_fast_price",
+      "from alpaca.data.historical.option import OptionHistoricalDataClient",
+      "from alpaca.data.requests import OptionSnapshotRequest",
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.enums import ContractType, OrderSide, TimeInForce",
+      "from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest",
+      "import alpha_engine as ae",
+      "import learn_tracker as lt",
+      "import market_barometer as mb",
+      "import market_mechanics_bible as mmb"
+    ]
+  },
+  {
+    "path": "market_mechanics_bible.py",
+    "sha256": "7e0dc694c0a59ffa9ab927e9d0defb676370751bf1793f08cf7f09e8c8c9c886",
+    "lines": 823,
+    "imports": [
+      "from __future__ import annotations",
+      "from dataclasses import asdict, dataclass",
+      "from datetime import date",
+      "from typing import Any, Dict, Literal, Optional, Tuple",
+      "from zoneinfo import ZoneInfo",
+      "import numpy as np",
+      "import pandas as pd"
+    ]
+  },
+  {
+    "path": "alpha_engine.py",
+    "sha256": "821056f7defd6d2cf1e401ba533969ab65a5280059ef09b342511dda6afaa5e8",
+    "lines": 286,
+    "imports": [
+      "from datetime import datetime",
+      "from zoneinfo import ZoneInfo",
+      "import numpy as np",
+      "import pandas as pd",
+      "from safe_yf import safe_download",
+      "import market_barometer as mb",
+      "import rvol_engine as re"
+    ]
+  },
+  {
+    "path": "dashboard.py",
+    "sha256": "e0a6dd068c8ede63fba7e848bc703dd9cd52731838087ad5746cb4250d2f30cb",
+    "lines": 1059,
+    "imports": [
+      "from datetime import datetime",
+      "import json",
+      "import os",
+      "from zoneinfo import ZoneInfo",
+      "from dotenv import load_dotenv",
+      "import numpy as np",
+      "import pandas as pd",
+      "import plotly.graph_objects as go",
+      "import streamlit as st",
+      "from streamlit_autorefresh import st_autorefresh",
+      "import yfinance as yf",
+      "import alpha_engine as ae",
+      "import economic_calendar as ec",
+      "import fundamental_engine as fe",
+      "from holly_engine import run_holly_overnight_optimization",
+      "import market_barometer as mb",
+      "import option_engine as oe",
+      "import research_momentum_bot as rmb"
+    ]
+  },
+  {
+    "path": "market_barometer.py",
+    "sha256": "1b588e2263f79b03e3eb2b09e3e6edf791d5d250a9b42a1a0e048658afdfa600",
+    "lines": 488,
+    "imports": [
+      "from datetime import datetime, timedelta",
+      "import math",
+      "import os",
+      "import time",
+      "from typing import Tuple",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "test_account.py",
+    "sha256": "7634e162b4f38dd189b52e99b36889aff87ccd02f366f996c5739447ea7d0c2c",
+    "lines": 19,
+    "imports": [
+      "import os",
+      "from dotenv import load_dotenv",
+      "from alpaca.trading.client import TradingClient"
+    ]
+  },
+  {
+    "path": "trader_bot.py",
+    "sha256": "97e65ddfa4554dc2c417c9a90c47d5fbf03383c3ccf64faa59901ca25e5ea460",
+    "lines": 71,
+    "imports": [
+      "import os",
+      "from dotenv import load_dotenv",
+      "from alpaca.trading.client import TradingClient",
+      "import yfinance as yf",
+      "import pandas as pd",
+      "import pandas_ta as ta"
+    ]
+  },
+  {
+    "path": "option_engine.py",
+    "sha256": "b916cbf88ea89b024c1afdf2d364d84a59769f04ec5cf552b67f9e19141ef994",
+    "lines": 222,
+    "imports": [
+      "import math",
+      "from datetime import datetime, timedelta",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "test_order.py",
+    "sha256": "201c5ed966940fa41f5e0413a8a802e4d4f50cd647760de6c5f86b5b6005bcae",
+    "lines": 80,
+    "imports": [
+      "import os, math",
+      "from datetime import date, timedelta",
+      "from dotenv import load_dotenv",
+      "from scipy.stats import norm",
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest",
+      "from alpaca.trading.enums import ContractType, OrderSide, TimeInForce",
+      "from alpaca.data.historical.option import OptionHistoricalDataClient",
+      "from alpaca.data.requests import OptionSnapshotRequest"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/ai_manager.py",
+    "sha256": "95dcdb47ed6e4cb71510a4745de3baa32bac490ae5cef506036a434af21b0fc0",
+    "lines": 128,
+    "imports": [
+      "import os",
+      "from datetime import datetime",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "from dotenv import load_dotenv"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/learn_tracker.py",
+    "sha256": "7463e8354486f428c4355a3dc5b5c24a883389c4ff889979ecf29d6c9495a590",
+    "lines": 440,
+    "imports": [
+      "from datetime import datetime",
+      "import json",
+      "import os",
+      "import uuid",
+      "from zoneinfo import ZoneInfo",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/holly_engine.py",
+    "sha256": "122e994e5b63fdf45ad29a20ef4b296f22f6d2a14e67cc6b7e798670a41aa3ea",
+    "lines": 204,
+    "imports": [
+      "import os",
+      "from datetime import datetime",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "import alpha_engine as ae",
+      "import market_barometer as mb",
+      "import option_engine as oe",
+      "import research_logger as rl",
+      "import rvol_engine as re"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/economic_calendar.py",
+    "sha256": "32f4c123b30b5f3d6c51b8f111aacf56f8da757bb7b58e07d6648609c2ce0989",
+    "lines": 67,
+    "imports": [
+      "import datetime",
+      "import yfinance as yf",
+      "import pandas as pd"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/desk_report_cards.py",
+    "sha256": "f45d1de967b5f17055dcfdef24a21f96c285fdbe5605295f042738c800e0cf29",
+    "lines": 114,
+    "imports": [
+      "import os",
+      "import pandas as pd",
+      "import numpy as np",
+      "import learn_tracker as lt"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/market_intelligence.py",
+    "sha256": "351288a321be4b86066a0a93c2aa30d0d20b37d04cd9c6b6500e1f21eee2c1c4",
+    "lines": 85,
+    "imports": [
+      "import pandas as pd",
+      "import pandas_ta as ta",
+      "from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/resolve_daily_candidates.py",
+    "sha256": "f27e6325abce7a95817a8a067fc543faf90b37a23c0906dd7f77a706f2d9510e",
+    "lines": 80,
+    "imports": [
+      "from datetime import datetime",
+      "import json",
+      "import os",
+      "from zoneinfo import ZoneInfo",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "import learn_tracker as lt"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/buy_tesla.py",
+    "sha256": "e94d1d3802c7fcfda53459a3fad7b480fdbdc62bb4cf80773447a98e00dbaa0e",
+    "lines": 100,
+    "imports": [
+      "import os",
+      "from dotenv import load_dotenv",
+      "from alpaca.trading.client import TradingClient",
+      "import yfinance as yf",
+      "import pandas as pd",
+      "import numpy as np"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/rvol_engine.py",
+    "sha256": "5cb42d5155587e1b99a1682a8647ba2fe8a7c69749c5716392431f7f6ad09cec",
+    "lines": 85,
+    "imports": [
+      "from datetime import datetime, timedelta",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/market_check.py",
+    "sha256": "3fa7bdb9eb68e0392042928d30ca2efed2a7af08231350fe5b2904214d7a404e",
+    "lines": 31,
+    "imports": [
+      "import pandas as pd",
+      "import yfinance as yf",
+      "import pandas_ta as ta"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/research_logger.py",
+    "sha256": "69210ad590ef2f678c94988471feb3b97e3fc4d15b03479b94849e3933e4fa1c",
+    "lines": 183,
+    "imports": [
+      "from datetime import datetime",
+      "import json",
+      "import os",
+      "from typing import Any, Dict, Optional",
+      "import pandas as pd"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/test_crypto.py",
+    "sha256": "340a3663bef5f7d15e22e01e3333e831e599482ad26b7ea92fc3ab9e8203a49b",
+    "lines": 27,
+    "imports": [
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.enums import OrderSide, TimeInForce",
+      "from alpaca.trading.requests import MarketOrderRequest"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/fundamental_engine.py",
+    "sha256": "4c8abe9da0b39df93f31242b5d11ab7c4d6c379b5f5fff79b1867b714cf9914c",
+    "lines": 285,
+    "imports": [
+      "from datetime import datetime",
+      "import numpy as np",
+      "import pandas as pd",
+      "import streamlit as st",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/watchlist_scanner.py",
+    "sha256": "872606eeeb870ec15ce235c258bbd0035a1aa866d649a1aa9dd2bde5e9f01093",
+    "lines": 215,
+    "imports": [
+      "import os",
+      "import time",
+      "from datetime import date, datetime, timedelta",
+      "from dotenv import load_dotenv",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.enums import ContractType, OrderSide, TimeInForce",
+      "from alpaca.trading.requests import GetOptionContractsRequest, MarketOrderRequest"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/research_momentum_bot.py",
+    "sha256": "624951a4d5f0e3eae8a89b5b994e07a12a664d2252a8c4633a3773553f34ae1a",
+    "lines": 724,
+    "imports": [
+      "from datetime import date, datetime, timedelta",
+      "import math",
+      "import os",
+      "import time",
+      "from zoneinfo import ZoneInfo",
+      "from dotenv import load_dotenv",
+      "import numpy as np",
+      "import pandas as pd",
+      "from scipy.stats import norm",
+      "import yfinance as yf",
+      "from alpaca.data.historical.option import OptionHistoricalDataClient",
+      "from alpaca.data.requests import OptionSnapshotRequest",
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.enums import ContractType, OrderSide, TimeInForce",
+      "from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest",
+      "import alpha_engine as ae",
+      "import learn_tracker as lt",
+      "import market_barometer as mb",
+      "import option_engine as oe",
+      "import research_logger as rl"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/alpha_engine.py",
+    "sha256": "aa9ddf44d2b1337e2afc59d620c6dbb77bf8e82cce6f145612b90a32c015a8b4",
+    "lines": 200,
+    "imports": [
+      "from datetime import datetime",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf",
+      "import market_barometer as mb",
+      "import rvol_engine as re"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/dashboard.py",
+    "sha256": "7fb77180c2a67bdd9c6fd09f23e4473dd8c9d7049cd076d7bb34dbbc9c3607ac",
+    "lines": 985,
+    "imports": [
+      "from datetime import datetime",
+      "import os",
+      "from zoneinfo import ZoneInfo",
+      "from dotenv import load_dotenv",
+      "import numpy as np",
+      "import pandas as pd",
+      "import plotly.graph_objects as go",
+      "import streamlit as st",
+      "import yfinance as yf",
+      "import alpha_engine as ae",
+      "import economic_calendar as ec",
+      "import fundamental_engine as fe",
+      "from holly_engine import run_holly_overnight_optimization",
+      "import market_barometer as mb",
+      "import option_engine as oe",
+      "import research_momentum_bot as rmb"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/market_barometer.py",
+    "sha256": "142f5adebad19a9c4d1a26c53759a0275e81c0d5e9b9b76cc7a57f898526bcd8",
+    "lines": 485,
+    "imports": [
+      "from datetime import datetime, timedelta",
+      "import math",
+      "import time",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/test_account.py",
+    "sha256": "7634e162b4f38dd189b52e99b36889aff87ccd02f366f996c5739447ea7d0c2c",
+    "lines": 19,
+    "imports": [
+      "import os",
+      "from dotenv import load_dotenv",
+      "from alpaca.trading.client import TradingClient"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/trader_bot.py",
+    "sha256": "97e65ddfa4554dc2c417c9a90c47d5fbf03383c3ccf64faa59901ca25e5ea460",
+    "lines": 71,
+    "imports": [
+      "import os",
+      "from dotenv import load_dotenv",
+      "from alpaca.trading.client import TradingClient",
+      "import yfinance as yf",
+      "import pandas as pd",
+      "import pandas_ta as ta"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/option_engine.py",
+    "sha256": "b916cbf88ea89b024c1afdf2d364d84a59769f04ec5cf552b67f9e19141ef994",
+    "lines": 222,
+    "imports": [
+      "import math",
+      "from datetime import datetime, timedelta",
+      "import numpy as np",
+      "import pandas as pd",
+      "import yfinance as yf"
+    ]
+  },
+  {
+    "path": "progress save 9-21-26/test_order.py",
+    "sha256": "201c5ed966940fa41f5e0413a8a802e4d4f50cd647760de6c5f86b5b6005bcae",
+    "lines": 80,
+    "imports": [
+      "import os, math",
+      "from datetime import date, timedelta",
+      "from dotenv import load_dotenv",
+      "from scipy.stats import norm",
+      "from alpaca.trading.client import TradingClient",
+      "from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest",
+      "from alpaca.trading.enums import ContractType, OrderSide, TimeInForce",
+      "from alpaca.data.historical.option import OptionHistoricalDataClient",
+      "from alpaca.data.requests import OptionSnapshotRequest"
+    ]
+  }
+]

@@ -1,0 +1,85 @@
+import pandas as pd
+import pandas_ta as ta
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import yfinance as yf
+
+analyzer = SentimentIntensityAnalyzer()
+
+
+def analyze_asset(symbol="TSLA"):
+    print(f"\n==============================")
+    print(f" MARKET INTELLIGENCE: {symbol}")
+    print(f"==============================")
+
+    ticker = yf.Ticker(symbol)
+
+    # 1. Technical Chart Analysis (Daily Bars)
+    df = ticker.history(period="6mo", interval="1d")
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    # Calculate Key Indicators
+    df["RSI"] = ta.rsi(df["Close"], length=14)
+    df["SMA_50"] = ta.sma(df["Close"], length=50)
+    df["SMA_200"] = ta.sma(df["Close"], length=200)
+
+    price = float(df["Close"].iloc[-1])
+    rsi = float(df["RSI"].iloc[-1])
+    sma50 = float(df["SMA_50"].iloc[-1])
+    sma200 = float(df["SMA_200"].iloc[-1])
+
+    trend = "BULLISH" if price > sma50 > sma200 else "BEARISH or MIXED"
+
+    print(f"Price:        ${price:.2f}")
+    print(f"14-Day RSI:   {rsi:.2f}")
+    print(f"50-Day SMA:   ${sma50:.2f}")
+    print(f"200-Day SMA:  ${sma200:.2f}")
+    print(f"Chart Trend:  {trend}")
+
+    # 2. News Headline Sentiment Scoring
+    print(f"\n--- Recent News Sentiment ---")
+    news_items = ticker.news
+    scores = []
+
+    if news_items:
+        for item in news_items[:5]:  # Analyze top 5 latest headlines
+            # Handle differences in yfinance news data structures
+            title = (
+                item.get("content", {}).get("title")
+                if "content" in item
+                else item.get("title", "")
+            )
+            if title:
+                sentiment = analyzer.polarity_scores(title)["compound"]
+                scores.append(sentiment)
+                tag = (
+                    "🟢 POSITIVE"
+                    if sentiment > 0.1
+                    else ("🔴 NEGATIVE" if sentiment < -0.1 else "⚪ NEUTRAL")
+                )
+                print(f"[{tag}] ({sentiment:+.2f}) {title[:75]}...")
+
+        avg_sentiment = sum(scores) / len(scores) if scores else 0.0
+    else:
+        avg_sentiment = 0.0
+        print("No live headlines returned.")
+
+    print(f"Average Sentiment Score: {avg_sentiment:+.2f} (-1.0 to +1.0)")
+
+    # 3. Combined Prediction Verdict
+    print(f"\n--- Strategy Decision ---")
+    if rsi < 40 and avg_sentiment > 0.05 and trend == "BULLISH":
+        print(
+            "Verdict: STRONG BUY (Dip in an uptrend with positive headline catalyst)"
+        )
+    elif rsi > 70 or avg_sentiment < -0.15:
+        print(
+            "Verdict: CAUTION / TRIM (Overbought RSI or negative news drag detected)"
+        )
+    else:
+        print("Verdict: NEUTRAL / HOLD (Awaiting confluence across indicators)")
+
+
+if __name__ == "__main__":
+    analyze_asset("TSLA")
+    analyze_asset("SPY")

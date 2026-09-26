@@ -1,0 +1,71 @@
+import os
+from dotenv import load_dotenv
+from alpaca.trading.client import TradingClient
+import yfinance as yf
+import pandas as pd
+import pandas_ta as ta
+
+load_dotenv()
+
+API_KEY = os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+
+# 2. Market Analysis (SPY)
+ticker = "SPY"
+print(f"--- Running Strategy Evaluation for {ticker} ---")
+
+data = yf.download(ticker, period="3mo", interval="1d", progress=False)
+
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
+
+data["RSI"] = ta.rsi(data["Close"], length=14)
+
+latest_close = float(data["Close"].iloc[-1])
+latest_rsi = float(data["RSI"].iloc[-1])
+
+print(f"Current SPY Price: ${latest_close:.2f}")
+print(f"Current 14-Day RSI: {latest_rsi:.2f}")
+
+# 3. Check Current Positions
+positions = client.get_all_positions()
+spy_position = next((p for p in positions if p.symbol == ticker), None)
+current_qty = int(spy_position.qty) if spy_position else 0
+
+print(f"Current {ticker} Holdings: {current_qty} shares")
+
+# 4. Automated Decision Engine
+# Entry Condition: RSI oversold and no existing open position
+if latest_rsi < 30 and current_qty == 0:
+    print("Action: BUY condition satisfied (RSI < 30). Submitting order...")
+    buy_order = MarketOrderRequest(
+        symbol=ticker,
+        qty=1,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+    )
+    order = client.submit_order(order_data=buy_order)
+    print(f"Order Placed! Order ID: {order.id}")
+
+# Exit Condition: RSI overbought and position currently held
+elif latest_rsi > 70 and current_qty > 0:
+    print(
+        "Action: SELL/TAKE PROFIT condition satisfied (RSI > 70). Submitting order..."
+    )
+    sell_order = MarketOrderRequest(
+        symbol=ticker,
+        qty=current_qty,
+        side=OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
+    )
+    order = client.submit_order(order_data=sell_order)
+    print(f"Sell Order Placed! Order ID: {order.id}")
+
+else:
+    print(
+        "Action: HOLD. Market criteria not met or position limits maintained."
+    )
+
+print("--- Cycle Finished ---")

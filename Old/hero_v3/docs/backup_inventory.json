@@ -1,0 +1,227 @@
+[
+  {
+    "backup": "./test_crypto.py",
+    "same_as_root": true,
+    "lines": 27
+  },
+  {
+    "backup": "./safe_yf.py",
+    "same_as_root": true,
+    "lines": 76
+  },
+  {
+    "backup": "./watchlist_scanner.py",
+    "same_as_root": true,
+    "lines": 215
+  },
+  {
+    "backup": "./alpha_engine.py",
+    "same_as_root": false,
+    "lines": 216
+  },
+  {
+    "backup": "./desk_report_cards.py",
+    "same_as_root": true,
+    "lines": 114
+  },
+  {
+    "backup": "./holly_engine.py",
+    "same_as_root": true,
+    "lines": 204
+  },
+  {
+    "backup": "./rvol_engine.py",
+    "same_as_root": true,
+    "lines": 104
+  },
+  {
+    "backup": "./economic_calendar.py",
+    "same_as_root": true,
+    "lines": 67
+  },
+  {
+    "backup": "./learn_tracker.py",
+    "same_as_root": false,
+    "lines": 440
+  },
+  {
+    "backup": "./research_logger.py",
+    "same_as_root": true,
+    "lines": 183
+  },
+  {
+    "backup": "./dashboard.py",
+    "same_as_root": false,
+    "lines": 1075
+  },
+  {
+    "backup": "./trader_bot.py",
+    "same_as_root": true,
+    "lines": 71
+  },
+  {
+    "backup": "./market_barometer.py",
+    "same_as_root": false,
+    "lines": 475
+  },
+  {
+    "backup": "./option_engine.py",
+    "same_as_root": true,
+    "lines": 222
+  },
+  {
+    "backup": "./test_order.py",
+    "same_as_root": true,
+    "lines": 80
+  },
+  {
+    "backup": "./fundamental_engine.py",
+    "same_as_root": true,
+    "lines": 285
+  },
+  {
+    "backup": "./market_intelligence.py",
+    "same_as_root": true,
+    "lines": 85
+  },
+  {
+    "backup": "./test_account.py",
+    "same_as_root": true,
+    "lines": 19
+  },
+  {
+    "backup": "./market_check.py",
+    "same_as_root": true,
+    "lines": 31
+  },
+  {
+    "backup": "./resolve_daily_candidates.py",
+    "same_as_root": true,
+    "lines": 80
+  },
+  {
+    "backup": "./research_momentum_bot.py",
+    "same_as_root": false,
+    "lines": 799
+  },
+  {
+    "backup": "./ai_manager.py",
+    "same_as_root": true,
+    "lines": 128
+  },
+  {
+    "backup": "./buy_tesla.py",
+    "same_as_root": true,
+    "lines": 100
+  },
+  {
+    "backup": "./progress save 9-21-26/test_crypto.py",
+    "same_as_root": true,
+    "lines": 27
+  },
+  {
+    "backup": "./progress save 9-21-26/watchlist_scanner.py",
+    "same_as_root": true,
+    "lines": 215
+  },
+  {
+    "backup": "./progress save 9-21-26/alpha_engine.py",
+    "same_as_root": false,
+    "lines": 200
+  },
+  {
+    "backup": "./progress save 9-21-26/desk_report_cards.py",
+    "same_as_root": true,
+    "lines": 114
+  },
+  {
+    "backup": "./progress save 9-21-26/holly_engine.py",
+    "same_as_root": true,
+    "lines": 204
+  },
+  {
+    "backup": "./progress save 9-21-26/rvol_engine.py",
+    "same_as_root": false,
+    "lines": 85
+  },
+  {
+    "backup": "./progress save 9-21-26/economic_calendar.py",
+    "same_as_root": true,
+    "lines": 67
+  },
+  {
+    "backup": "./progress save 9-21-26/learn_tracker.py",
+    "same_as_root": false,
+    "lines": 440
+  },
+  {
+    "backup": "./progress save 9-21-26/research_logger.py",
+    "same_as_root": true,
+    "lines": 183
+  },
+  {
+    "backup": "./progress save 9-21-26/dashboard.py",
+    "same_as_root": false,
+    "lines": 985
+  },
+  {
+    "backup": "./progress save 9-21-26/trader_bot.py",
+    "same_as_root": true,
+    "lines": 71
+  },
+  {
+    "backup": "./progress save 9-21-26/market_barometer.py",
+    "same_as_root": false,
+    "lines": 485
+  },
+  {
+    "backup": "./progress save 9-21-26/option_engine.py",
+    "same_as_root": true,
+    "lines": 222
+  },
+  {
+    "backup": "./progress save 9-21-26/test_order.py",
+    "same_as_root": true,
+    "lines": 80
+  },
+  {
+    "backup": "./progress save 9-21-26/fundamental_engine.py",
+    "same_as_root": true,
+    "lines": 285
+  },
+  {
+    "backup": "./progress save 9-21-26/market_intelligence.py",
+    "same_as_root": true,
+    "lines": 85
+  },
+  {
+    "backup": "./progress save 9-21-26/test_account.py",
+    "same_as_root": true,
+    "lines": 19
+  },
+  {
+    "backup": "./progress save 9-21-26/market_check.py",
+    "same_as_root": true,
+    "lines": 31
+  },
+  {
+    "backup": "./progress save 9-21-26/resolve_daily_candidates.py",
+    "same_as_root": true,
+    "lines": 80
+  },
+  {
+    "backup": "./progress save 9-21-26/research_momentum_bot.py",
+    "same_as_root": false,
+    "lines": 724
+  },
+  {
+    "backup": "./progress save 9-21-26/ai_manager.py",
+    "same_as_root": true,
+    "lines": 128
+  },
+  {
+    "backup": "./progress save 9-21-26/buy_tesla.py",
+    "same_as_root": true,
+    "lines": 100
+  }
+]

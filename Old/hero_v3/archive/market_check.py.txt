@@ -1,0 +1,31 @@
+import pandas as pd
+import yfinance as yf
+import pandas_ta as ta
+
+ticker = "SPY"
+print(f"--- Fetching Market Data for {ticker} ---")
+
+data = yf.download(ticker, period="3mo", interval="1d", progress=False)
+
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
+
+data["RSI"] = ta.rsi(data["Close"], length=14)
+
+latest_close = float(data["Close"].iloc[-1])
+latest_rsi = float(data["RSI"].iloc[-1])
+latest_date = data.index[-1].strftime("%Y-%m-%d")
+
+print(f"Date: {latest_date}")
+print(f"Latest Close Price: ${latest_close:.2f}")
+print(f"14-Day RSI: {latest_rsi:.2f}")
+
+if latest_rsi < 30:
+    signal = "OVERSOLD (Potential Buy Setup)"
+elif latest_rsi > 70:
+    signal = "OVERBOUGHT (Potential Sell/Trim Setup)"
+else:
+    signal = "NEUTRAL (Within Standard Range)"
+
+print(f"Strategy Signal: {signal}")
+print("--- Data Pipeline Operational! ---")

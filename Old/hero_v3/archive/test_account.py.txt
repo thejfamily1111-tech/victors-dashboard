@@ -1,0 +1,19 @@
+import os
+from dotenv import load_dotenv
+from alpaca.trading.client import TradingClient
+
+load_dotenv()
+
+API_KEY = os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+
+# Pull virtual account stats
+account = client.get_account()
+
+print("--- Alpaca Paper Connection Verified ---")
+print(f"Account Status: {account.status}")
+print(f"Cash Balance:   ${float(account.cash):,.2f}")
+print(f"Buying Power:   ${float(account.buying_power):,.2f}")
+print("----------------------------------------")

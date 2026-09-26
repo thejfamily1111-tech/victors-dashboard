@@ -1,0 +1,92 @@
+{
+  "SPY": {
+    "timestamp": "2026-09-25T15:45:01.557623-04:00",
+    "stage": "EOD_FLATTEN_SUBMITTED",
+    "reason": "HERO-only flatten for SPY260928C00769000.",
+    "details": {}
+  },
+  "QQQ": {
+    "timestamp": "2026-09-25T15:36:38.851586-04:00",
+    "stage": "CLOSE_SUBMITTED",
+    "reason": "STOP_HIT at underlying $743.36; underlying result \u2248 -1.04R",
+    "details": {
+      "contract": "QQQ260929C00742000"
+    }
+  },
+  "SMH": {
+    "timestamp": "2026-09-25T14:55:23.777552-04:00",
+    "stage": "SCANNING",
+    "reason": "No production setup. Research pattern: IN_BALANCE_OR_UNCONFIRMED",
+    "details": {
+      "orb_high": 609.6599731445312,
+      "orb_low": 603.3300170898438,
+      "vwap": 606.4349281117746
+    }
+  },
+  "NVDA": {
+    "timestamp": "2026-09-25T15:45:01.734873-04:00",
+    "stage": "EOD_FLATTEN_SUBMITTED",
+    "reason": "HERO-only flatten for NVDA260930P00227500.",
+    "details": {}
+  },
+  "AMD": {
+    "timestamp": "2026-09-25T14:55:25.213196-04:00",
+    "stage": "SCANNING",
+    "reason": "No production setup. Research pattern: IN_BALANCE_OR_UNCONFIRMED",
+    "details": {
+      "orb_high": 638.9500122070312,
+      "orb_low": 630.469970703125,
+      "vwap": 632.1828665003925
+    }
+  },
+  "MSFT": {
+    "timestamp": "2026-09-25T15:45:01.633071-04:00",
+    "stage": "EOD_FLATTEN_SUBMITTED",
+    "reason": "HERO-only flatten for MSFT260928C00515000.",
+    "details": {}
+  },
+  "AAPL": {
+    "timestamp": "2026-09-25T14:55:29.352255-04:00",
+    "stage": "REJECTED",
+    "reason": "EXTREME_CHASE_CIRCUIT_BREAKER_4.61R",
+    "details": {
+      "extension_r": 4.609827454862841
+    }
+  },
+  "AMZN": {
+    "timestamp": "2026-09-25T14:55:30.221427-04:00",
+    "stage": "SCANNING",
+    "reason": "No production setup. Research pattern: IN_BALANCE_OR_UNCONFIRMED",
+    "details": {
+      "orb_high": 250.15989685058594,
+      "orb_low": 247.7100067138672,
+      "vwap": 249.06830351110443
+    }
+  },
+  "COIN": {
+    "timestamp": "2026-09-25T14:55:31.508177-04:00",
+    "stage": "SCANNING",
+    "reason": "No production setup. Research pattern: IN_BALANCE_OR_UNCONFIRMED",
+    "details": {
+      "orb_high": 199.75,
+      "orb_low": 194.20010375976562,
+      "vwap": 195.11339926444137
+    }
+  },
+  "META": {
+    "timestamp": "2026-09-25T15:45:01.457080-04:00",
+    "stage": "EOD_FLATTEN_SUBMITTED",
+    "reason": "HERO-only flatten for META260930P00765000.",
+    "details": {}
+  },
+  "TSLA": {
+    "timestamp": "2026-09-25T14:55:32.772315-04:00",
+    "stage": "SCANNING",
+    "reason": "No production setup. Research pattern: IN_BALANCE_OR_UNCONFIRMED",
+    "details": {
+      "orb_high": 386.8299865722656,
+      "orb_low": 369.776611328125,
+      "vwap": 372.80731866803603
+    }
+  }
+}

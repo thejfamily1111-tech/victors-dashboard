@@ -1,0 +1,215 @@
+import os
+import time
+from datetime import date, datetime, timedelta
+from dotenv import load_dotenv
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import ContractType, OrderSide, TimeInForce
+from alpaca.trading.requests import (
+    GetOptionContractsRequest,
+    MarketOrderRequest,
+)
+
+# 1. Credentials & Initialization
+load_dotenv()
+API_KEY = os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+
+# 2. Strategy Configuration
+CONTRACT_QTY = 1
+SLEEP_INTERVAL_SECONDS = 900  # 15 minutes
+
+WATCHLIST = [
+    # Mega-Cap Tech & Semis
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
+    # Financials & Crypto
+    "JPM", "BAC", "GS", "MS", "COIN", "HOOD",
+    # Energy & High Beta
+    "XOM", "CVX", "SLB", "PLTR", "ARM", "SMCI",
+    # Key Market & Sector ETFs
+    "SPY", "QQQ", "IWM", "SMH", "XLF", "XLE",
+]
+
+
+def is_market_open() -> bool:
+    """Checks Alpaca live market clock."""
+    try:
+        clock = client.get_clock()
+        return clock.is_open
+    except Exception as e:
+        print(f"⚠️ Could not check market clock: {e}")
+        return True
+
+
+def find_best_contract(symbol: str, current_price: float, contract_type: ContractType):
+    """
+    Finds the closest At-The-Money (ATM) option contract expiring 
+    within a 3 to 8 day window to minimize same-day 0DTE theta decay.
+    """
+    today = date.today()
+    min_exp = today + timedelta(days=2)
+    max_exp = today + timedelta(days=8)
+
+    req = GetOptionContractsRequest(
+        underlying_symbols=[symbol],
+        status="active",
+        type=contract_type,
+        expiration_date_gte=min_exp,
+        expiration_date_lte=max_exp,
+        limit=100,
+    )
+
+    try:
+        res = client.get_option_contracts(req)
+        if not res.option_contracts:
+            return None
+
+        # Select contract closest to underlying spot price
+        best = min(
+            res.option_contracts,
+            key=lambda c: abs(float(c.strike_price) - current_price),
+        )
+        return best
+    except Exception as e:
+        print(f"⚠️ Failed fetching contracts for {symbol}: {e}")
+        return None
+
+
+def scan_and_execute():
+    print(f"\n========================================================")
+    print(f"🔄 Scanning Watchlist at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"========================================================")
+
+    # 1. Fetch active underlying positions to prevent duplicate entries
+    active_underlyings = set()
+    try:
+        positions = client.get_all_positions()
+        for p in positions:
+            # Map OCC option symbols or equity symbols back to root ticker
+            root = p.symbol[:4].strip() if len(p.symbol) > 6 else p.symbol
+            active_underlyings.add(root)
+            active_underlyings.add(p.symbol)
+    except Exception as e:
+        print(f"⚠️ Error querying active positions: {e}")
+
+    # 2. Fetch pending orders to prevent duplicate orders mid-flight
+    pending_symbols = set()
+    try:
+        orders = client.get_orders()
+        for o in orders:
+            root = o.symbol[:4].strip() if len(o.symbol) > 6 else o.symbol
+            pending_symbols.add(root)
+            pending_symbols.add(o.symbol)
+    except Exception as e:
+        print(f"⚠️ Error querying pending orders: {e}")
+
+    executed_count = 0
+
+    for ticker in WATCHLIST:
+        if ticker in active_underlyings:
+            print(f"⚪ {ticker:<5} : Already holding active position/option. Skipping.")
+            continue
+
+        if ticker in pending_symbols:
+            print(f"⚪ {ticker:<5} : Has pending order in queue. Skipping.")
+            continue
+
+        try:
+            df = yf.download(ticker, period="5d", interval="15m", progress=False)
+            if df.empty or len(df) < 5:
+                print(f"⚪ {ticker:<5} : Insufficient candle data.")
+                continue
+
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            latest = df.iloc[-1]
+            open_p = float(latest["Open"])
+            high_p = float(latest["High"])
+            low_p = float(latest["Low"])
+            close_p = float(latest["Close"])
+
+            body = abs(close_p - open_p)
+            upper_wick = high_p - max(close_p, open_p)
+            lower_wick = min(close_p, open_p) - low_p
+            candle_range = high_p - low_p
+
+            if candle_range == 0:
+                print(f"⚪ {ticker:<5} : Flat candle. Skipping.")
+                continue
+
+            # Candlestick definitions
+            is_hammer = (lower_wick >= 2 * body) and (upper_wick <= body * 0.3) and (close_p > open_p)
+            is_shooting_star = (upper_wick >= 2 * body) and (lower_wick <= body * 0.3) and (close_p < open_p)
+
+            # Signal 1: Bullish Hammer -> Buy Long Call
+            if is_hammer:
+                contract = find_best_contract(ticker, close_p, ContractType.CALL)
+                if contract:
+                    print(f"🎯 [TRIGGER] {ticker} — Bullish Hammer!")
+                    print(f"   Contract: {contract.symbol} | Strike: ${contract.strike_price} | Exp: {contract.expiration_date}")
+
+                    order_req = MarketOrderRequest(
+                        symbol=contract.symbol,
+                        qty=CONTRACT_QTY,
+                        side=OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY,
+                    )
+                    res = client.submit_order(order_req)
+                    print(f"   ⚡ Live Call Order Sent! ID: {res.id}")
+                    executed_count += 1
+                else:
+                    print(f"⚪ {ticker:<5} : Hammer detected, but no matching 3-8D contract found.")
+
+            # Signal 2: Bearish Shooting Star -> Buy Long Put
+            elif is_shooting_star:
+                contract = find_best_contract(ticker, close_p, ContractType.PUT)
+                if contract:
+                    print(f"🎯 [TRIGGER] {ticker} — Bearish Shooting Star!")
+                    print(f"   Contract: {contract.symbol} | Strike: ${contract.strike_price} | Exp: {contract.expiration_date}")
+
+                    order_req = MarketOrderRequest(
+                        symbol=contract.symbol,
+                        qty=CONTRACT_QTY,
+                        side=OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY,
+                    )
+                    res = client.submit_order(order_req)
+                    print(f"   ⚡ Live Put Order Sent! ID: {res.id}")
+                    executed_count += 1
+                else:
+                    print(f"⚪ {ticker:<5} : Shooting Star detected, but no matching 3-8D contract found.")
+
+            else:
+                print(f"⚪ {ticker:<5} : No setup criteria met.")
+
+        except Exception as e:
+            print(f"❌ {ticker:<5} : Processing error -> {e}")
+
+    print(f"\nCycle completed. {executed_count} setup(s) executed.")
+    print(f"⏳ Sleeping {SLEEP_INTERVAL_SECONDS // 60} minutes ({SLEEP_INTERVAL_SECONDS}s) until next cycle...")
+    print("========================================================\n")
+
+
+if __name__ == "__main__":
+    while True:
+        try:
+            if not is_market_open():
+                print(f"\n🌙 Market is closed ({datetime.now().strftime('%H:%M:%S')}). Scanner paused.")
+                print("⏳ Sleeping 5 minutes before checking clock again...")
+                time.sleep(300)
+                continue
+
+            scan_and_execute()
+            time.sleep(SLEEP_INTERVAL_SECONDS)
+
+        except KeyboardInterrupt:
+            print("\n🛑 Watchlist scanner stopped by user.")
+            break
+        except Exception as err:
+            print(f"\n⚠️ Unexpected cycle error: {err}. Retrying in 60s...")
+            time.sleep(60)

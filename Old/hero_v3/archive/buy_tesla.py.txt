@@ -1,0 +1,100 @@
+import os
+from dotenv import load_dotenv
+from alpaca.trading.client import TradingClient
+import yfinance as yf
+import pandas as pd
+import numpy as np
+# Load credentials from .env
+load_dotenv()
+
+API_KEY = os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+
+SYMBOL = "TSLA"
+QTY = 1
+
+# 2. Pull Market Data & Calculate Confluence Indicators
+print(f"Fetching market data for {SYMBOL}...")
+df = yf.download(SYMBOL, period="180d", interval="1d", progress=False)
+
+if isinstance(df.columns, pd.MultiIndex):
+  df.columns = df.columns.get_level_values(0)
+
+# Moving Averages & Volatility
+df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+high_low = df["High"] - df["Low"]
+high_close = (df["High"] - df["Close"].shift()).abs()
+low_close = (df["Low"] - df["Close"].shift()).abs()
+tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+df["ATR"] = tr.rolling(window=14).mean()
+
+# Candle Mechanics
+df["Range"] = df["High"] - df["Low"]
+df["Close_Loc"] = (df["Close"] - df["Low"]) / df["Range"].replace(0, np.nan)
+df["Lower_Wick"] = (
+    df[["Open", "Close"]].min(axis=1) - df["Low"]
+) / df["Range"].replace(0, np.nan)
+upper_wick = (df["High"] - df[["Open", "Close"]].max(axis=1)) / df[
+    "Range"
+].replace(0, np.nan)
+
+curr = df.iloc[-1]
+prior = df.iloc[-2]
+lowest_20 = df["Low"].iloc[-21:-1].min()
+highest_20 = df["High"].iloc[-21:-1].max()
+atr = curr["ATR"] if not np.isnan(curr["ATR"]) else curr["Close"] * 0.02
+
+# 3. Market Structure Evaluation
+is_bull_sweep = prior["Low"] < lowest_20 and curr["Close"] > lowest_20
+is_hammer = (curr["Lower_Wick"] >= 0.55) and (curr["Close_Loc"] >= 0.65)
+trend_bullish = (
+    curr["EMA_20"] > curr["EMA_50"] and curr["Close"] > curr["EMA_20"]
+)
+
+is_bear_sweep = prior["High"] > highest_20 and curr["Close"] < highest_20
+is_shooting_star = (upper_wick.iloc[-1] >= 0.55) and (curr["Close_Loc"] <= 0.35)
+trend_bearish = (
+    curr["EMA_20"] < curr["EMA_50"] and curr["Close"] < curr["EMA_20"]
+)
+
+# 4. Route Execution Based on Market Bias
+action = None
+if trend_bullish and (is_bull_sweep or is_hammer):
+  action = "BUY"
+  stop_price = round(curr["Low"] - (0.25 * atr), 2)
+  risk = curr["Close"] - stop_price
+  target_price = round(curr["Close"] + (2.0 * risk), 2)
+elif trend_bearish and (is_bear_sweep or is_shooting_star):
+  action = "SELL"
+  stop_price = round(curr["High"] + (0.25 * atr), 2)
+  risk = stop_price - curr["Close"]
+  target_price = round(curr["Close"] - (2.0 * risk), 2)
+else:
+  print(f"No high-confluence trigger active for {SYMBOL}. Standing aside.")
+
+# 5. Submit Dynamic Bracket Order
+if action in ["BUY", "SELL"]:
+  order_side = OrderSide.BUY if action == "BUY" else OrderSide.SELL
+  print(
+      f"--- Executing {action} Bracket Order for {SYMBOL} at"
+      f" ${curr['Close']:.2f} ---"
+  )
+  print(f"Stop: ${stop_price} | Target: ${target_price}")
+
+  bracket_order = MarketOrderRequest(
+      symbol=SYMBOL,
+      qty=QTY,
+      side=order_side,
+      time_in_force=TimeInForce.GTC,
+      order_class=OrderClass.BRACKET,
+      take_profit=TakeProfitRequest(limit_price=target_price),
+      stop_loss=StopLossRequest(stop_price=stop_price),
+  )
+
+  order = client.submit_order(order_data=bracket_order)
+  print(f"Order ID: {order.id}")
+  print(f"Status:   {order.status}")

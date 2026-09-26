@@ -1,0 +1,80 @@
+import os, math
+from datetime import date, timedelta
+from dotenv import load_dotenv
+from scipy.stats import norm
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetOptionContractsRequest, LimitOrderRequest
+from alpaca.trading.enums import ContractType, OrderSide, TimeInForce
+from alpaca.data.historical.option import OptionHistoricalDataClient
+from alpaca.data.requests import OptionSnapshotRequest
+
+load_dotenv()
+trading_client = TradingClient(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"), paper=True)
+data_client = OptionHistoricalDataClient(os.getenv("ALPACA_API_KEY"), os.getenv("ALPACA_SECRET_KEY"))
+
+def get_delta(spot, strike, dte, is_call=True, iv=0.20, r=0.045):
+    t = max(dte, 0.5) / 365.0
+    d1 = (math.log(spot / strike) + (r + 0.5 * iv**2) * t) / (iv * math.sqrt(t))
+    return float(norm.cdf(d1)) if is_call else float(norm.cdf(d1) - 1.0)
+
+today = date.today()
+spot = 717.0
+
+req = GetOptionContractsRequest(
+    underlying_symbols=["SPY"],
+    status="active",
+    type=ContractType.CALL,
+    expiration_date_gte=today + timedelta(days=2),
+    expiration_date_lte=today + timedelta(days=7),
+    strike_price_gte=str(spot * 0.98),
+    strike_price_lte=str(spot * 1.01),
+    limit=20
+)
+res = trading_client.get_option_contracts(req)
+symbols = [c.symbol for c in res.option_contracts]
+snaps = data_client.get_option_snapshot(OptionSnapshotRequest(symbol_or_symbols=symbols))
+
+candidates = []
+for c in res.option_contracts:
+    snap = snaps.get(c.symbol)
+    if not snap or not snap.latest_quote:
+        continue
+    bid = float(snap.latest_quote.bid_price)
+    ask = float(snap.latest_quote.ask_price)
+    if bid <= 0.05:
+        continue
+    mid = round((bid + ask) / 2.0, 2)
+    dte = (c.expiration_date - today).days
+    delta = get_delta(spot, float(c.strike_price), dte, is_call=True)
+    
+    if 0.60 <= delta <= 0.75:
+        candidates.append({
+            "symbol": c.symbol,
+            "delta": delta,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid
+        })
+
+if candidates:
+    best = min(candidates, key=lambda x: abs(x["delta"] - 0.65))
+    sym = best["symbol"]
+    delta_val = best["delta"]
+    bid_val = best["bid"]
+    ask_val = best["ask"]
+    mid_val = best["mid"]
+    
+    print(f"\n🎯 Best Contract Selected: {sym} | Delta: {delta_val:.3f} | Bid: ${bid_val} | Ask: ${ask_val}")
+    print(f"💵 Submitting Midpoint Limit Order at: ${mid_val:.2f}")
+    
+    order = LimitOrderRequest(
+        symbol=sym,
+        qty=1,
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+        limit_price=mid_val
+    )
+    submitted = trading_client.submit_order(order)
+    print(f"✅ Order Accepted: ID {submitted.id} | Status: {submitted.status}")
+else:
+    print("No contract found in delta range.")

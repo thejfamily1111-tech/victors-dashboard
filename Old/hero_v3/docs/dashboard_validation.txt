@@ -1,0 +1,1 @@
+Streamlit AppTest: production snapshot fixture rendered with 0 exceptions, 2 tables and 1 ticker selector. No broker/network access. Chart constructed from production candles.
