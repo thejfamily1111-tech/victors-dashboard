@@ -368,11 +368,48 @@ def rule_panel(df, vic_report=None):
     st.caption(f'Evaluation bar: {ts+pd.Timedelta(minutes=5):%Y-%m-%d %H:%M} ET. Historical bars are not current signals. Missing or expired VIC permission blocks both entries.')
 
 
+@st.cache_data(ttl=60,show_spinner=False)
+def fetch_vix_display():
+    """Show the latest valid level independently; daily closes are never live permissions."""
+    errors=[];now=pd.Timestamp(datetime.now(ET))
+    try:
+        import yfinance as yf
+        raw=yf.Ticker('^VIX').history(period='5d',interval='5m',prepost=False,auto_adjust=False,actions=False,timeout=12,raise_errors=True)
+        if raw.index.tz is None:raise ValueError('Missing timezone')
+        raw=raw.tz_convert(ET).sort_index()
+        raw=raw[(raw.index+pd.Timedelta(minutes=5)<=now)]
+        closes=pd.to_numeric(raw.Close,errors='coerce')
+        closes=closes[closes.map(lambda v:pd.notna(v) and math.isfinite(v) and v>0)]
+        if closes.empty:raise ValueError('No completed VIX values')
+        ts=closes.index[-1]+pd.Timedelta(minutes=5)
+        return {'value':float(closes.iloc[-1]),'as_of':ts.isoformat(),'kind':'5-minute close','source':'Yahoo Finance','error':None}
+    except Exception as exc:errors.append('Yahoo VIX: '+type(exc).__name__)
+    try:
+        import ssl,certifi
+        from urllib.request import Request,urlopen
+        ctx=ssl.create_default_context();ctx.load_verify_locations(cafile=certifi.where())
+        url='https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv'
+        with urlopen(Request(url,headers={'User-Agent':'Mozilla/5.0'}),context=ctx,timeout=12) as response:
+            table=pd.read_csv(io.StringIO(response.read(2_000_000).decode('utf-8-sig')))
+        table['DATE']=pd.to_datetime(table.DATE,format='%m/%d/%Y',errors='coerce')
+        table['CLOSE']=pd.to_numeric(table.CLOSE,errors='coerce')
+        table=table.dropna(subset=['DATE','CLOSE'])
+        table=table[(table.DATE.dt.date<=now.date()) & table.CLOSE.map(lambda v:math.isfinite(v) and v>0)].sort_values('DATE')
+        if table.empty:raise ValueError('No valid daily VIX close')
+        row=table.iloc[-1]
+        return {'value':float(row.CLOSE),'as_of':str(row.DATE.date()),'kind':'Daily close · historical','source':'Cboe','error':None}
+    except Exception as exc:errors.append('Cboe VIX: '+type(exc).__name__)
+    return {'value':None,'as_of':None,'kind':'Unavailable','source':None,'error':'; '.join(errors)}
+
+
 def volatility_panel(vic_report):
     st.subheader('Macro Volatility & Execution Radar · VIC')
-    value=number(mapping(vic_report).get('vix'))
+    quote=fetch_vix_display()
+    value=number(quote.get('value'))
     st.metric('CBOE Volatility Index · VIX',f'{value:.2f}' if value is not None else '—')
-    st.caption('VIX is a market indicator. Account balances and allocation amounts are not displayed.')
+    if quote.get('error'):st.warning(quote['error'])
+    elif quote['kind'].startswith('Daily'):st.caption(f"{quote['source']} · {quote['kind']} · {quote['as_of']}. Display only; not a current trading quote.")
+    else:st.caption(f"{quote['source']} · {quote['kind']} · {display_time(quote['as_of'])}. May be delayed; VIC separately checks freshness.")
     policy=mapping(mapping(vic_report).get('policy'))
     if policy:st.caption(f"Entry gate: VIX below {policy.get('max_vix')} · post-release pause {policy.get('post_news_minutes')} minutes. Initial configurable rules, not optimized parameters.")
 
@@ -536,7 +573,7 @@ def vic_module():
     spec=importlib.util.spec_from_file_location('victor_vic_runtime',BASE/'vic.py')
     module=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not hasattr(module,'collect_context'):raise ValueError('Outdated VIC module')
+    if not hasattr(module,'collect_context') or not hasattr(module,'headline_signal'):raise ImportError('Replace vic.py with the complete matched macro version')
     return module
 
 
@@ -589,15 +626,14 @@ def vic_dashboard_report(df, selected_ticker, now):
             except Exception:pass
         if qqq is not None and not qqq.empty:
             market['qqq_bars']=[{'bar_end':(ts+pd.Timedelta(minutes=5)).isoformat(),'close':float(r.Close),'ema9':float(r.EMA9),'ema21':float(r.EMA21)} for ts,r in qqq.tail(2).iterrows()]
-        try:
-            v=prepare_bars(fetch_bars('^VIX'),datetime.now(ET))
-            market.update(vix=float(v.Close.iloc[-1]),vix_at=(v.index[-1]+pd.Timedelta(minutes=5)).isoformat())
-        except Exception:pass
+        quote=fetch_vix_display()
+        if quote.get('value') is not None and quote.get('kind')=='5-minute close':
+            market.update(vix=quote['value'],vix_at=quote['as_of'])
         report=vm.VicRiskManager().evaluate(context,market)
     except Exception as exc:
         report={'health':'RED','current_bias':'UNKNOWN',
                 'briefing':f'VIC unavailable while {stage} ({type(exc).__name__}). News and calendar feeds are displayed separately.',
-                'permission':{'light':'RED'},'evaluation_error':f'{stage}: {type(exc).__name__}'}
+                'permission':{'light':'RED'},'evaluation_error':f'{stage}: {type(exc).__name__}'+(' — replace BOTH dashboard.py and vic.py from the matched package, then restart.' if stage=='loading vic.py' else '')}
     # Never discard source data because a separate calculation raised an exception.
     report['events']=context.get('events',[])
     report['calendar_errors']=context.get('calendar_errors',[])
@@ -611,6 +647,9 @@ def news_calendar_panel(symbol,vic):
     st.subheader('📅 Catalysts & Macro Schedule')
     st.caption('All times use America/New_York (EST/EDT automatically). Publication times and scheduled event times are shown separately. Calendar scope: Fed, BLS and BEA; not a complete global event calendar.')
     events=vic.get('events',[])
+    show_all=st.checkbox('Show other scheduled releases too',value=False,key='all_macro_events')
+    if not show_all:events=[e for e in events if e.get('impact')=='HIGH' or 'speech' in e.get('title','').lower() or 'chair' in e.get('title','').lower()]
+    events=sorted(events,key=lambda e:(e['date'],e.get('scheduled_at') or ''))
     if events:
         rows=[]
         now=datetime.now(ET)
@@ -621,27 +660,23 @@ def news_calendar_panel(symbol,vic):
             rows.append({'Date':e['date'],'Time (Eastern)':display_time(e.get('scheduled_at')) if e.get('scheduled_at') else 'Time not supplied',
                          'Event':e['title'],'Impact rule':e['impact'],'Source':e['source'],'Status':status,'Source link':e['url']})
         st.dataframe(rows,hide_index=True,width='stretch',column_config={'Source link':st.column_config.LinkColumn('Source')})
-    else:st.info('No calendar rows available. This does not mean no events are scheduled.')
+    else:st.info('No matching upcoming events returned. Check feed status below; this is not confirmation of an event-free calendar.')
     for error in vic.get('calendar_errors',[]):st.warning(error)
     st.caption('HIGH events pause new entries from the start of the day until publication/completion is verified, the pause expires and QQQ confirms a trend. A Fed press conference requires verified completion; the clock alone does not unlock trading.')
     with st.expander('Calendar connection details'):
         for source,item in vic.get('calendar_sources',{}).items():
             st.write(source, item.get('error') or 'Fetched '+display_time(item.get('checked_at')))
-    st.subheader(f'📰 {symbol} · Yahoo Finance Headlines')
-    try:news=vic_module().fetch_news(symbol)
-    except Exception as exc:news={'error':f'Yahoo news could not load ({type(exc).__name__}). Check that the updated vic.py is beside dashboard.py and restart Streamlit.','items':[]}
+    st.subheader('📰 Market-Moving News · VIC Watch')
+    try:news=vic_module().fetch_news()
+    except Exception as exc:news={'error':f'Market news could not load ({type(exc).__name__}). Check that the updated vic.py is beside dashboard.py and restart Streamlit.','items':[]}
     if news.get('error'):st.info(news['error'])
     elif news.get('checked_at'):st.caption('Feed fetched '+display_time(news['checked_at'])+' · headlines may be delayed and are not exhaustive.')
-    rows=[{'Published (Eastern)':display_time(n.get('published_at')),'Headline':n.get('title'),
+    for warning in news.get('warnings',[]):st.caption(warning)
+    st.caption('Positive/negative labels are provisional keyword flags. Either can pause new entries for 30 minutes while price action settles; a positive headline never authorizes a trade by itself.')
+    rows=[{'Published (Eastern)':display_time(n.get('published_at')),'Headline':n.get('title'),'VIC flag':n.get('signal','UNCLASSIFIED'),'Freshness':'Historical' if n.get('stale') else 'Recent',
            'Publisher':n.get('source'),'Article':n.get('url') if str(n.get('url','')).startswith(('https://','http://')) else None} for n in news.get('items',[])]
     if rows:st.dataframe(rows,hide_index=True,width='stretch',column_config={'Article':st.column_config.LinkColumn('Read article')})
-    elif not news.get('error'):st.info('Yahoo returned no headlines for this ticker. Try Refresh market data or another ticker; an empty response does not mean no news exists.')
-    st.subheader(f'📅 {symbol} · Earnings Schedule')
-    if symbol=='QQQ':st.caption('QQQ is an ETF and has no company earnings release. Enter a company ticker to view its earnings schedule.')
-    else:
-        rows,error=fetch_earnings(symbol)
-        if rows:st.dataframe(rows,hide_index=True,width='stretch')
-        if error:st.info(error)
+    elif not news.get('error'):st.info('No market headlines returned. Try Refresh market data; this does not mean there is no market-moving news.')
     st.link_button('Federal Reserve calendar','https://www.federalreserve.gov/newsevents/calendar.htm')
     st.link_button('BLS calendar','https://www.bls.gov/schedule/')
     st.link_button('BEA calendar','https://www.bea.gov/news/schedule')
@@ -679,9 +714,10 @@ def main():
         st.caption('QQQ calls · HERO | QQQ puts · BEAR')
         st.caption('Positions, orders and activity are shown when an executor reports them. Account balances and allocation amounts are hidden.')
         st.markdown('### Macro Officer · VIC')
-        st.caption('Yahoo headlines · Fed / BLS / BEA calendars')
+        st.caption('Market news · Fed / BLS / BEA calendars')
         if st.button('Refresh market data',width='stretch'):
             fetch_bars.clear()
+            fetch_vix_display.clear()
             fetch_fundamentals.clear()
             fetch_earnings.clear()
             try:vic_module().CACHE.clear()
@@ -696,7 +732,7 @@ def main():
             st.rerun()
         st.caption('Monitor only · no order buttons')
     st.title('⚡ Victor Terminal')
-    st.caption('Apex Quantitative Intelligence Terminal | QQQ Execution Monitor')
+    st.caption('Apex Quantitative Intelligence Terminal | QQQ Execution Monitor · Macro build 2026-09-26')
     c1,c2=st.columns(2)
     selected_ticker=c1.text_input('Asset Ticker Symbol',value=TICKER,key='analysis_ticker',help='Enter a stock or ETF symbol and press Enter. This changes analysis only; trading remains QQQ.').strip().upper()
     if not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-]{0,14}',selected_ticker):
@@ -728,9 +764,9 @@ def main():
             c1.metric('New-entry permission',vic['health'])
             c2.metric('QQQ technical bias',vic['current_bias'])
             st.write(vic['briefing'])
-            st.caption('Rule-based briefing · Yahoo QQQ headlines and official calendars. Bias describes completed QQQ price action, not AI sentiment. RED never blocks exits.')
+            st.caption('Rule-based briefing · market-wide headlines and official calendars. Bias describes completed QQQ price action, not AI sentiment. RED never blocks exits.')
             if vic.get('heartbeat'):st.caption('Evaluated '+display_time(vic['heartbeat']))
-        tab_analysis,tab_engine,tab_calendar=st.tabs(['📈 Deep-Dive Ticker Analysis','📉 VIX & Market Volatility','📅 Live News & Earnings Catalysts'])
+        tab_analysis,tab_engine,tab_calendar=st.tabs(['📈 Deep-Dive Ticker Analysis','📉 VIX & Market Volatility','📅 Important Events & Market News'])
         with tab_analysis:
             st.subheader('⚡ HERO & BEAR · Positions & Trading Activity')
             snap=show_pipeline(hero,reports,now)
