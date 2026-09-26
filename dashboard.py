@@ -193,13 +193,39 @@ def qqq_orders(data):
     return [o for o in rows if isinstance(o, dict) and o.get('ticker') == TICKER]
 
 
-def render_chart(df, days, bands, emas, vwap, symbol=TICKER):
+def chart_bars(df, minutes=5):
+    """Aggregate complete regular-session bars; never change execution inputs."""
+    if minutes not in (5, 15, 30):
+        raise ValueError('Unsupported chart interval')
+    if minutes == 5:
+        return df.copy()
+    rule = f'{minutes}min'
+    grouped = df.resample(rule, origin='start_day', offset='9h30min',
+                          closed='left', label='left')
+    bars = grouped.agg({'Open':'first', 'High':'max', 'Low':'min',
+                        'Close':'last', 'Volume':'sum'})
+    # Require every constituent 5m candle; drop forming or incomplete groups.
+    bars = bars[grouped.Close.count() == minutes // 5].dropna()
+    if bars.empty:
+        return bars
+    chart = prepare_bars(bars, df.index[-1] + pd.Timedelta(minutes=5))
+    # Session VWAP stays based on the original 5m volume/price observations.
+    chart['VWAP'] = grouped.VWAP.last().reindex(chart.index)
+    return chart
+
+
+def render_chart(df, days, bands, emas, vwap, symbol=TICKER, minutes=5):
+    source = df
+    df = chart_bars(source, minutes)
+    if df.empty:
+        st.info('No complete candles available for this chart interval yet.')
+        return
     dates = sorted(set(df.index.date))[-days:]
     plot = df[[d in dates for d in df.index.date]].copy()
     # Naive Eastern labels ensure browser timezone cannot shift chart times.
     x = plot.index.tz_localize(None)
     fig = go.Figure(go.Candlestick(x=x, open=plot.Open, high=plot.High, low=plot.Low,
-                                  close=plot.Close, name=f'{symbol} · completed 5m',
+                                  close=plot.Close, name=f'{symbol} · completed {minutes}m',
                                   increasing_line_color='#00e676', decreasing_line_color='#ff5252'))
     lines = []
     if emas:
@@ -213,7 +239,7 @@ def render_chart(df, days, bands, emas, vwap, symbol=TICKER):
                                 line=dict(color=color, width=1.4)))
     for day in dates:
         session = plot[plot.index.date == day]
-        orb = opening_range(session)
+        orb = opening_range(source[source.index.date == day])
         if orb:
             for value, color, name in [(orb[0],'#00e676','ORB15 High'), (orb[1],'#ff5252','ORB15 Low')]:
                 fig.add_shape(type='line', x0=f'{day} 09:45', x1=session.index[-1].tz_localize(None),
@@ -223,9 +249,9 @@ def render_chart(df, days, bands, emas, vwap, symbol=TICKER):
                                        text=f'{name} {value:.2f}', showarrow=False, yshift=10)
     if st.session_state.get('show_structure',True):
         try:
-            layer=analysis_inputs(df)['structure'];price=float(df.Close.iloc[-1])
+            layer=analysis_inputs(source)['structure'];price=float(source.Close.iloc[-1])
             # Current snapshot only: short forward extensions prevent hindsight chart lines.
-            start=x[-1]+pd.Timedelta(minutes=5);finish=start+pd.Timedelta(minutes=15)
+            start=source.index[-1].tz_localize(None)+pd.Timedelta(minutes=5);finish=start+pd.Timedelta(minutes=15)
             for z in nearest_zones(layer,price):
                 color='#00e676' if z['price']<=price else '#ff5252'
                 fig.add_trace(go.Scatter(x=[start,finish],y=[z['price'],z['price']],mode='lines',
@@ -238,7 +264,7 @@ def render_chart(df, days, bands, emas, vwap, symbol=TICKER):
                       height=520, margin=dict(l=10,r=15,t=25,b=15),
                       xaxis_rangeslider_visible=False, legend=dict(orientation='h', y=1.1),
                       xaxis_title='Eastern time · completed candles', yaxis_title=f'{symbol} price',
-                      uirevision=f'{symbol}-{days}')
+                      uirevision=f'{symbol}-{days}-{minutes}')
     fig.update_xaxes(rangebreaks=[dict(bounds=['sat','mon']), dict(bounds=[16,9.5],pattern='hour')])
     st.plotly_chart(fig, width='stretch')
 
@@ -363,7 +389,7 @@ def nearest_zones(layer,price):
 def structure_panel(df,symbol):
     st.markdown(f'#### {symbol} · Support & Resistance')
     try:
-        layer=analysis_inputs(df)['structure'];price=float(df.Close.iloc[-1])
+        layer=analysis_inputs(source)['structure'];price=float(source.Close.iloc[-1])
         rows=[{'Side':'Support' if z['price']<=price else 'Resistance','Zone low':z['low'],'Zone high':z['high'],
                'Level':z['price'],'Sources':', '.join(z['sources']),'Confirmed swing visits':z['visits']} for z in nearest_zones(layer,price)]
         if rows:st.dataframe(rows,hide_index=True,width='stretch')
@@ -825,7 +851,12 @@ def main():
                 with cols[3]: card('15-Minute ORB','Locked' if orb else 'Incomplete','09:30–09:45 ET · chart session')
                 with cols[4]: card(f'{selected_ticker} RSI · 14 / 5m',f'{last.RSI14:.1f}' if pd.notna(last.RSI14) else '—','Wilder · completed candles','#00e5ff')
                 st.subheader(f'📊 Tactical Intraday Structure: {selected_ticker}')
-                render_chart(df,days,bands,emas,vwap,selected_ticker)
+                chart_minutes = st.selectbox('Chart candle interval', [5, 15, 30],
+                    format_func=lambda value: f'{value} minutes', key='chart_minutes')
+                st.caption(f'Chart: {chart_minutes}-minute candles, EMAs and Bollinger Bands. '
+                           'Trading signals and technical cards remain on 5 minutes. '
+                           'ORB stays 15 minutes; support/resistance levels and session VWAP retain their original calculation.')
+                render_chart(df,days,bands,emas,vwap,selected_ticker,chart_minutes)
                 structure_panel(df,selected_ticker)
                 st.caption(f'Yahoo Finance · may be delayed · last displayed session: {df.index[-1].date()}. Only completed regular-session candles. Indicators use available prior sessions for warmup.')
                 if df.index[-1].date()!=now.date(): st.info('Showing the latest available historical session, not today’s trading activity.')
