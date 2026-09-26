@@ -389,7 +389,7 @@ def nearest_zones(layer,price):
 def structure_panel(df,symbol):
     st.markdown(f'#### {symbol} · Support & Resistance')
     try:
-        layer=analysis_inputs(source)['structure'];price=float(source.Close.iloc[-1])
+        layer=analysis_inputs(df)['structure'];price=float(df.Close.iloc[-1])
         rows=[{'Side':'Support' if z['price']<=price else 'Resistance','Zone low':z['low'],'Zone high':z['high'],
                'Level':z['price'],'Sources':', '.join(z['sources']),'Confirmed swing visits':z['visits']} for z in nearest_zones(layer,price)]
         if rows:st.dataframe(rows,hide_index=True,width='stretch')
