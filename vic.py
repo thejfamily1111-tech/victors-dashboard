@@ -15,10 +15,10 @@ from urllib.error import URLError, HTTPError
 import ssl, socket
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor
-import json, os, re, html, time, tempfile
+import json, os, re, html, time, tempfile, hashlib
 import xml.etree.ElementTree as XML
 
-VIC_BUILD='2026-09-26-macro-1'
+VIC_BUILD='2026-09-26-macro-2'
 BASE=Path(__file__).resolve().parent
 ET=ZoneInfo('America/New_York')
 CALENDARS={
@@ -154,14 +154,45 @@ def parse_fed(text):
     return output
 
 
+def load_bls_snapshot(now=None):
+    """A dated, hash-bound user import; reading/copying never renews its age."""
+    now=stamp(now or datetime.now(ET))
+    raw=(BASE/'bls.ics').read_bytes()
+    meta=json.loads((BASE/'bls_snapshot.json').read_text())
+    if len(raw)>5_000_000 or hashlib.sha256(raw).hexdigest()!=meta['sha256']:
+        raise ValueError('BLS snapshot changed; import a freshly downloaded calendar')
+    imported=stamp(meta['imported_at']);expires=imported+timedelta(days=7)
+    rows=parse_ics(raw.decode('utf-8-sig'),'BLS',CALENDARS['BLS'])
+    error=None
+    if not imported<=now<expires:error='BLS saved calendar expired or import date is invalid; download and import a fresh bls.ics'
+    elif not min(e['date'] for e in rows)<=str(now.date())<=max(e['date'] for e in rows):
+        error='BLS saved calendar does not cover today; download and import a fresh bls.ics'
+    return {'events':rows,'checked_at':now.isoformat(),'error':error,
+            'mode':'LOCAL SNAPSHOT','imported_at':imported.isoformat(),
+            'expires_at':expires.isoformat(),
+            'warning':'Using a saved BLS calendar; schedule changes after import are not reflected.'}
+
+
 def fetch_calendar(source):
     url=CALENDARS[source]
     def work():
-        raw=request_text(url)
-        rows=parse_fed(raw) if source=='Fed' else parse_ics(raw,source,url)
-        return {'events':rows,'checked_at':datetime.now(ET).isoformat(),'error':None}
-    try:return cached('calendar:'+source,900,work)
-    except Exception as exc:return {'events':[],'checked_at':None,'error':f'{source} calendar unavailable: {connection_error(exc)}'}
+        try:
+            raw=request_text(url)
+            rows=parse_fed(raw) if source=='Fed' else parse_ics(raw,source,url)
+            return {'events':rows,'checked_at':datetime.now(ET).isoformat(),'error':None,'mode':'ONLINE'}
+        except Exception as exc:
+            # Cache failed online attempts briefly; still re-read local data on every call.
+            return {'events':[],'checked_at':None,'error':f'{source} calendar unavailable: {connection_error(exc)}'}
+    old=CACHE.get('calendar:'+source)
+    ttl=60 if old and old[1].get('error') else 900
+    bundle=cached('calendar:'+source,ttl,work)
+    if source!='BLS' or not bundle.get('error'):return bundle
+    try:
+        snapshot=load_bls_snapshot()
+        snapshot['online_error']=bundle['error']
+        return snapshot
+    except Exception as exc:
+        return {**bundle,'error':bundle['error']+'; saved calendar missing or invalid. Import a fresh bls.ics with import_bls_calendar.py.'}
 
 
 def headline_signal(title):
@@ -319,6 +350,9 @@ class VicRiskManager:
             if set(context['sources'])!=set(CALENDARS):raise ValueError()
             for source in context['sources'].values():
                 rows=source.get('events',[])
+                if source.get('error'):raise ValueError()
+                if source.get('mode')=='LOCAL SNAPSHOT':
+                    if not stamp(source['imported_at'])<=now<stamp(source['expires_at']):raise ValueError()
                 if not rows or not min(e['date'] for e in rows)<=str(now.date())<=max(e['date'] for e in rows):raise ValueError()
                 if not 0<=(now-stamp(source['checked_at'])).total_seconds()<=1800:raise ValueError()
         except (ValueError,TypeError,KeyError):reasons.append('Calendar status missing or stale')

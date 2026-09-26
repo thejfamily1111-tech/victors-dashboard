@@ -661,11 +661,15 @@ def news_calendar_panel(symbol,vic):
                          'Event':e['title'],'Impact rule':e['impact'],'Source':e['source'],'Status':status,'Source link':e['url']})
         st.dataframe(rows,hide_index=True,width='stretch',column_config={'Source link':st.column_config.LinkColumn('Source')})
     else:st.info('No matching upcoming events returned. Check feed status below; this is not confirmation of an event-free calendar.')
+    for source,item in vic.get('calendar_sources',{}).items():
+        if item.get('mode')=='LOCAL SNAPSHOT':
+            st.info(f"{source}: saved calendar · imported {display_time(item.get('imported_at'))} · refresh before {display_time(item.get('expires_at'))}. Schedule changes since import are not reflected.")
     for error in vic.get('calendar_errors',[]):st.warning(error)
     st.caption('HIGH events pause new entries from the start of the day until publication/completion is verified, the pause expires and QQQ confirms a trend. A Fed press conference requires verified completion; the clock alone does not unlock trading.')
     with st.expander('Calendar connection details'):
         for source,item in vic.get('calendar_sources',{}).items():
-            st.write(source, item.get('error') or 'Fetched '+display_time(item.get('checked_at')))
+            st.write(source, item.get('error') or (item.get('mode','ONLINE')+' · checked '+display_time(item.get('checked_at'))))
+            if item.get('online_error'):st.caption(item['online_error'])
     st.subheader('📰 Market-Moving News · VIC Watch')
     try:news=vic_module().fetch_news()
     except Exception as exc:news={'error':f'Market news could not load ({type(exc).__name__}). Check that the updated vic.py is beside dashboard.py and restart Streamlit.','items':[]}
