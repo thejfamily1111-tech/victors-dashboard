@@ -4,7 +4,7 @@ Keep next to vic.py, hero.py, bear.py, avatar_logo.png and your existing .env.
 DASHBOARD_PIN is mandatory; define it in .env or server Streamlit secrets.
 This dashboard never submits orders. It computes an informational VIC report;
 run run_paper.py --run --paper-orders for VIC/HERO/BEAR paper execution.
-Positions/orders come from optional hero_telemetry.json (or bot_telemetry.json)
+Positions/orders come from a configured private relay or local hero_telemetry.json (or bot_telemetry.json)
 and bear_telemetry.json. Only explicitly permitted fields are rendered;
 account balances, buying power, equity and allocation figures are omitted.
 HERO/BEAR are loaded as class definitions; VIC is imported without running CLI.
@@ -94,6 +94,55 @@ def load_status(name):
             data, error = read_json(path)
             return data, error, path.name
     return None, None, None
+
+
+def telemetry_setting(name, default=''):
+    value=os.getenv(name)
+    if value is not None:return value
+    try:return str(st.secrets.get(name,default))
+    except Exception:return default
+
+
+@st.cache_data(ttl=10,show_spinner=False)
+def remote_execution_report(url,key,token):
+    from telemetry_link import fetch_remote
+    return fetch_remote(url,key,token)
+
+
+def execution_reports(now):
+    mode=telemetry_setting('TELEMETRY_MODE','local').lower()
+    if mode=='local':
+        return {name:load_status(name) for name in ('hero','bear')}
+    unavailable={name:(None,'Remote execution report unavailable','private connection') for name in ('hero','bear')}
+    if mode!='remote':
+        st.error('Invalid TELEMETRY_MODE. Use local or remote.')
+        return unavailable
+    try:
+        envelope=remote_execution_report(telemetry_setting('TELEMETRY_URL'),
+            telemetry_setting('TELEMETRY_PUBLISHABLE_KEY'),telemetry_setting('TELEMETRY_READ_TOKEN'))
+    except Exception:
+        st.error('Private trading connection unavailable. Check the telemetry service and Streamlit secrets. No current positions can be confirmed.')
+        return unavailable
+    if envelope is None:
+        st.info('Private connection configured; waiting for the first upload from your Mac.')
+        return unavailable
+    snap=envelope['snapshot']
+    bridge_state,_=freshness({'heartbeat':snap.get('observed_at')},now)
+    st.caption('Private paper-trading connection · Mac upload: '+display_time(snap.get('observed_at'))+
+               ' · Server received: '+display_time(envelope.get('received_at')))
+    if bridge_state!='RECENT REPORT':
+        st.warning('Mac connection is stale or its clock is invalid. The records below are historical, not a confirmed current account view.')
+    v=snap.get('vic')
+    if isinstance(v,dict):
+        vic_state,_=freshness(v,now)
+        st.caption('VIC on Mac: '+str(v.get('health','UNKNOWN'))+' · Bias: '+str(v.get('current_bias','UNKNOWN'))+
+                   ' · '+vic_state+' · Last report: '+display_time(v.get('heartbeat')))
+    reports={}
+    for name in ('hero','bear'):
+        data=snap['reports'].get(name)
+        problem=None if data else 'No valid paper executor report received from the Mac.'
+        reports[name]=(data,problem,'private connection')
+    return reports
 
 
 def freshness(data, now):
@@ -275,7 +324,7 @@ def show_pipeline(hero, reports, now):
         data,error,_=reports[name];data=mapping(data)
         state,_=freshness(data,now)
         st.markdown(f'#### {name.upper()} · QQQ Positions, Orders & Activity')
-        st.caption(f'Report: {state}')
+        st.caption(f'Report: {state} · Last bot update: {display_time(data.get("heartbeat"))}')
         if data.get('paper') is True:
             st.caption('ALPACA PAPER · simulated orders')
         if isinstance(data.get('health'),str):st.write('Executor:',data['health'])
@@ -808,7 +857,7 @@ def main():
     @st.fragment(run_every='15s' if auto else None)
     def body():
         now=datetime.now(ET)
-        reports={name:load_status(name) for name in ('hero','bear')}
+        reports=execution_reports(now)
         hero=reports['hero'][0]
         vic=None
         context=None
