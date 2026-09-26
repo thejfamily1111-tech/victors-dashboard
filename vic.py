@@ -2,6 +2,9 @@
 Run: python3 vic.py (continuous) or python3 vic.py --once.
 The dashboard also evaluates VIC while open. All times are America/New_York.
 Calendar scope: Fed events, BLS releases, BEA releases; not every global event.
+Mag-7 breadth is advisory only; no count can grant or veto permission.
+News: reported material events may pause for 30m; WATCH never pauses.
+Routine headlines are hidden. Heuristics do not verify truth or actual impact.
 Policy defaults (unvalidated): VIX <35, 15m post-release pause, 2 completed
 5m bars confirming EMA trend after release. Override VIC_MAX_VIX and
 VIC_POST_NEWS_MINUTES in the existing .env. Missing required inputs => RED.
@@ -18,7 +21,73 @@ from concurrent.futures import ThreadPoolExecutor
 import json, os, re, html, time, tempfile, hashlib
 import xml.etree.ElementTree as XML
 
-VIC_BUILD='2026-09-26-macro-2'
+VIC_BUILD='2026-09-26-material-news-mag7'
+import re
+MAG7=('MSFT','AAPL','NVDA','AMZN','GOOGL','META','TSLA')
+TRUSTED={'Yahoo Finance','CNBC','BBC Business'}
+
+
+def classify_news(title):
+    t=re.sub(r'\s+',' ',str(title).casefold()).strip()
+    def result(level,category,reason):
+        return {'level':level,'category':category,'reason':reason,'pause_candidate':level=='HIGH'}
+    uncertainty_text=re.sub(r'\b(than expected|above expectations|below expectations|versus expectations)\b','',t)
+    uncertain=bool(re.search(r'\b(could|might|may|rumou?r|reportedly|unconfirmed|denies|denied|not|no|if|would|expects?|expected|forecasts?|predicts?|prediction|preview|outlook|bets?|odds|what to watch|opinion|should|why|how to)\b|\?',uncertainty_text))
+    # Require BOTH a material subject and a concrete event, not sentiment words.
+    patterns=[
+      ('MONETARY_POLICY',r'\b(federal reserve|fed|fomc|ecb|bank of japan)\b',r'\b(cuts?|raises?|hikes?|holds?|announces?|announced|approves?|launches?)\b.{0,55}\b(rates?|stimulus|bond.buying|emergency|liquidity)\b|\bemergency rate (cut|hike)\b'),
+      ('US_ECONOMIC_RELEASE',r'\b(us|u\.s\.|american)\b|\b(bls|bea)\b',r'\b(cpi|pce|inflation|payrolls?|jobs report|unemployment|gdp)\b.{0,65}\b(rose|rises|fell|falls|jumped|jumps|surged|surges|slowed|slows|accelerated|accelerates|added|adds|reported|reports|released|release|beats|misses)\b|\b(adds|added|loses|lost)\b.{0,30}\bjobs\b'),
+      ('SYSTEMIC_DISRUPTION',r'\b(market.wide|nyse|nasdaq|us banking|u\.s\. banking|fdic|treasury|us government|u\.s\. government)\b',r'\b(halt|halts|halted|outage|default|defaults|fails|failure|seizes|seized|emergency|shutdown)\b'),
+      ('TRADE_POLICY',r'\b(us|u\.s\.|china|white house|president|treasury|eu)\b',r'\b(imposes?|imposed|raises?|raised|removes?|removed|suspends?|suspended|cuts?|cut)\b.{0,35}\btariffs?\b|\btariffs?\b.{0,35}\b(imposed|raised|removed|suspended|cut)\b|\btrade (deal|agreement)\b.{0,25}\b(signed|reached)\b'),
+      ('GEOPOLITICAL_SHOCK',r'\b(us|u\.s\.|china|taiwan|iran|israel|russia|nato|hormuz)\b',r'\b(launches?|launched)\b.{0,30}\b(strikes?|attack|invasion)\b|\b(invades|invasion|war breaks out|ceasefire signed|ceasefire reached|strait of hormuz closed)\b')]
+    for category,subject,event in patterns:
+        if re.search(subject,t) and re.search(event,t):
+            if uncertain:return result('WATCH',category,'Speculative, denied or conditional wording; no automatic pause')
+            return result('HIGH',category,'Concrete material-event wording; reported headline, not independently verified')
+    company=r'\b(apple|microsoft|nvidia|amazon|alphabet|google|meta|tesla|aapl|msft|nvda|amzn|googl|tsla)\b'
+    if re.search(company,t) and re.search(r'\b(earnings|guidance|revenue|export ban|antitrust|outage|recall)\b',t):
+        return result('WATCH','MEGACAP_EVENT','Potential QQQ context; single-company headline does not veto entries')
+    if re.search(r'\b(fed|fomc|cpi|pce|payrolls|tariffs?|recession|war|ceasefire|bank failure)\b',t):
+        return result('WATCH','MACRO_CONTEXT','Context or unclear event; no automatic pause')
+    return result('IGNORE','ROUTINE','Routine recap, recommendation or no configured material event')
+
+
+def active_alerts(items,now,stamp):
+    """Original publication time controls expiry; polling never resets the timer.
+    Exact normalized duplicates use earliest publication across publishers.
+    """
+    grouped={}
+    for item in items:
+        if item.get('source') not in TRUSTED:continue
+        info=classify_news(item.get('title',''))
+        if not info['pause_candidate']:continue
+        try:published=stamp(item['published_at'])
+        except (KeyError,ValueError,TypeError):continue
+        key=re.sub(r'[^a-z0-9]+',' ',str(item.get('title','')).casefold()).strip()
+        if key not in grouped or published<grouped[key][0]:grouped[key]=(published,item,info)
+    alerts=[]
+    for published,item,info in grouped.values():
+        if 0<=(now-published).total_seconds()<1800:
+            alerts.append({'title':item['title'],'source':item['source'],'category':info['category'],
+                           'published_at':published.isoformat(),'pause_until':(published+timedelta(minutes=30)).isoformat(),'reason':info['reason']})
+    return alerts
+
+
+def breadth(statuses,bar_end,now,stamp):
+    result={'bias':'UNKNOWN','preferred_engine':None,'green':0,'red':0,'flat':0,'available':0,'bar_end':bar_end,'mode':'CONTEXT_ONLY','statuses':{},'reason':'Missing or stale aligned Mag-7 data'}
+    try:
+        end=stamp(bar_end)
+        if end.date()!=now.date() or not 0<=(now-end).total_seconds()<=180:return result
+        clean={s:statuses[s] for s in MAG7 if statuses.get(s) in {'GREEN','RED','FLAT'}}
+        result.update(statuses=clean,available=len(clean))
+        for label in ('green','red','flat'):result[label]=sum(x==label.upper() for x in clean.values())
+        # Partial coverage is shown but never interpreted as a complete seven-stock vote.
+        if len(clean)!=7:return result
+        bias='BULLISH' if result['green']>=4 else 'BEARISH' if result['red']>=4 else 'NEUTRAL'
+        result.update(bias=bias,preferred_engine='HERO' if bias=='BULLISH' else 'BEAR' if bias=='BEARISH' else None,reason='Completed 5m close vs previous regular-session close; informational, never an entry veto')
+    except (ValueError,TypeError,KeyError):pass
+    return result
+
 BASE=Path(__file__).resolve().parent
 ET=ZoneInfo('America/New_York')
 CALENDARS={
@@ -196,13 +265,8 @@ def fetch_calendar(source):
 
 
 def headline_signal(title):
-    """Transparent keyword flags, not semantic news understanding or a trade signal."""
-    t=title.lower()
-    negative=r'emergency rate|market.wide.*halt|unscheduled.*fed|circuit breaker|bank fail|bank collaps|missile strike|military strike|war breaks out|tariffs? (?:imposed|raised|hike)|stocks? (?:plunge|tumble|crash)|recession warning|inflation (?:surges|accelerates)'
-    positive=r'trade (?:deal|agreement) (?:signed|reached)|ceasefire (?:deal|agreement)|tariffs? (?:cut|removed|suspended)|inflation (?:cools|eases|falls)|stocks? (?:surge|soar|rally)|rate cut|stimulus (?:approved|announced)'
-    neg=bool(re.search(negative,t));pos=bool(re.search(positive,t))
-    if (neg or pos) and (re.search(r'\b(?:not|no|denies|rumou?r|could|may|might|if)\b',t) or (neg and pos)):return 'UNCERTAIN / REVIEW'
-    return 'POTENTIALLY NEGATIVE' if neg else 'POTENTIALLY POSITIVE' if pos else 'UNCLASSIFIED'
+    """Compatibility label: event relevance, never a price-direction forecast."""
+    return classify_news(title)['level']
 
 
 def fetch_news(symbol=None):
@@ -215,7 +279,7 @@ def fetch_news(symbol=None):
         try:
             rows=rss_items(url)
             if not rows:raise ValueError('Empty RSS feed')
-            for row in rows:row.update(source=source,signal=headline_signal(row['title']))
+            for row in rows:row.update(source=source,signal=headline_signal(row['title']),triage=classify_news(row['title']))
             return source,rows,None
         except Exception as exc:return source,[],source+': '+connection_error(exc)
     def work():
@@ -231,7 +295,7 @@ def fetch_news(symbol=None):
                     key=(row['title'].casefold(),row['url'])
                     if key not in seen:items.append(row);seen.add(key)
         items.sort(key=lambda n:stamp(n['published_at']),reverse=True)
-        return {'items':items[:100],'checked_at':now.isoformat(),
+        return {'items':[n for n in items if n['triage']['level']!='IGNORE'][:100],'ignored_count':sum(n['triage']['level']=='IGNORE' for n in items),'checked_at':now.isoformat(),
                 'error':None if any(not n['stale'] for n in items) else 'No recent market headlines available; any articles below are historical.',
                 'warnings':[v['error'] for v in sources.values() if v['error']],
                 'sources':sources,'scope':'Market-wide Yahoo Finance, CNBC and BBC Business RSS; limited coverage, not exhaustive.'}
@@ -361,12 +425,20 @@ class VicRiskManager:
         try:
             if news.get('error') or not 0<=(now-stamp(news['checked_at'])).total_seconds()<=120:raise ValueError()
         except (ValueError,TypeError,KeyError):reasons.append(news.get('error') or 'News status missing or stale')
-        for item in news.get('items',[]):
-            try:
-                signal=headline_signal(item['title'])
-                if 0<=(now-stamp(item['published_at'])).total_seconds()<=1800 and signal!='UNCLASSIFIED':
-                    reasons.append('Market-news pause ('+signal+'): '+item['title'])
-            except (ValueError,TypeError,KeyError):reasons.append('Invalid news timestamp')
+        alerts=active_alerts(news.get('items',[]),now,stamp)
+        for alert in alerts:
+            reasons.append('Material-news pause ('+alert['category']+') until '+stamp(alert['pause_until']).strftime('%H:%M ET')+': '+alert['title'])
+        breadth_market=market
+        qqq=market.get('qqq_bars',[])
+        # Existing callers need no new fields or imports. Optional fetch failures are context-only.
+        if 'mag7_status' not in market and qqq:
+            try:breadth_market={**market,**mag7_snapshot(qqq[-1]['bar_end'])}
+            except Exception:pass
+        mag7=breadth(breadth_market.get('mag7_status',{}),breadth_market.get('mag7_bar_end'),now,stamp)
+        if qqq and (not mag7.get('bar_end') or stamp(mag7['bar_end'])!=stamp(qqq[-1]['bar_end'])):
+            mag7=breadth({},None,now,stamp)
+        breadth_note=f"Mag-7 context: {mag7['bias']} ({mag7['green']}/7 green, {mag7['red']}/7 red, {mag7['available']}/7 available); preference {mag7['preferred_engine'] or 'none'}. Context only, not a veto."
+
         try:
             vix=finite(market['vix'])
             if not vix>0 or not 0<=(now-stamp(market['vix_at'])).total_seconds()<=600:raise ValueError()
@@ -407,14 +479,43 @@ class VicRiskManager:
             deadlines.extend([stamp(market['vix_at'])+timedelta(seconds=600),stamp(bars[-1]['bar_end'])+timedelta(seconds=180),stamp(news['checked_at'])+timedelta(seconds=120)])
         return {'schema_version':1,'heartbeat':now.isoformat(),'health':light,'current_bias':bias,
                 'permission':{'light':light,'checked_at':now.isoformat(),'valid_until':min(deadlines).isoformat()},
-                'briefing':'; '.join(reasons) if reasons else 'Required macro inputs available; no active configured block. HERO/BEAR must still pass their own entry rules.',
-                'reasons':reasons,'vix':vix,'policy':{'max_vix':self.max_vix,'post_news_minutes':self.post_news_minutes},
+                'briefing':('; '.join(reasons) if reasons else 'Required macro inputs available; no active configured block. HERO/BEAR must still pass their own entry rules.')+' '+breadth_note+' News: only HIGH material-event reports can pause; WATCH is informational.',
+                'reasons':reasons,'vix':vix,'mag7':mag7,'news_alerts':alerts,'policy':{'max_vix':self.max_vix,'post_news_minutes':self.post_news_minutes},
                 'events':context.get('events',[]),'news':news,'calendar_errors':context.get('calendar_errors',[]),
                 'calendar_sources':{s:{k:v for k,v in b.items() if k!='events'} for s,b in context.get('sources',{}).items()},
-                'scope':'Fed/BLS/BEA calendar + market-wide Yahoo Finance/CNBC/BBC Business RSS. Keyword flags are provisional; neither comprehensive news coverage nor AI sentiment.'}
+                'scope':'Fed/BLS/BEA calendar + market-wide Yahoo Finance/CNBC/BBC Business RSS. Material-event heuristics are unverified headline triage, not comprehensive coverage or AI sentiment. Mag-7 is context only.'}
 
 
-def market_snapshot():
+def mag7_snapshot(bar_end):
+    """Yahoo context for standalone VIC/dashboard. Executor uses aligned Alpaca bars."""
+    def work():
+        import yfinance as yf
+        import pandas as pd
+        end=stamp(bar_end);ts=pd.Timestamp(end)-pd.Timedelta(minutes=5)
+        def one(symbol):
+            try:
+                f=yf.Ticker(symbol).history(period='5d',interval='5m',prepost=False,auto_adjust=False,actions=False,timeout=8,raise_errors=True)
+                if f.index.tz is None or f.index.has_duplicates:return symbol,None
+                f=f.tz_convert(ET).sort_index().between_time('09:30','15:55')
+                f=f[f.index+pd.Timedelta(minutes=5)<=end];prior=f[f.index.date<end.date()]
+                if ts not in f.index or prior.empty or prior.index[-1].strftime('%H:%M') not in ('15:55','12:55'):return symbol,None
+                # Reject missing intervening weekday sessions conservatively (holiday may yield UNKNOWN).
+                day=prior.index[-1].date();expected=end.date()-timedelta(days=1)
+                while expected.weekday()>=5:expected-=timedelta(days=1)
+                if day!=expected:return symbol,None
+                current,previous=finite(f.loc[ts,'Close']),finite(prior.Close.iloc[-1])
+                if min(current,previous)<=0:return symbol,None
+                return symbol,'GREEN' if current>previous else 'RED' if current<previous else 'FLAT'
+            except Exception:return symbol,None
+        with ThreadPoolExecutor(max_workers=4) as pool:statuses={s:v for s,v in pool.map(one,MAG7) if v}
+        return {'mag7_status':statuses,'mag7_bar_end':end.isoformat()}
+    end=stamp(bar_end);current=datetime.now(ET)
+    if end.date()!=current.date() or not 0<=(current-end).total_seconds()<=180:
+        return {'mag7_status':{},'mag7_bar_end':bar_end}
+    return cached('mag7:'+str(bar_end),60,work)
+
+
+def market_snapshot(include_mag7=True):
     import yfinance as yf
     import pandas as pd
     now=datetime.now(ET);out={'qqq_bars':[]}
@@ -430,6 +531,8 @@ def market_snapshot():
                 df['ema9']=df.Close.ewm(span=9,adjust=False,min_periods=9).mean();df['ema21']=df.Close.ewm(span=21,adjust=False,min_periods=21).mean()
                 out['qqq_bars']=[{'bar_end':(ts+pd.Timedelta(minutes=5)).isoformat(),'close':float(r.Close),'ema9':float(r.ema9),'ema21':float(r.ema21)} for ts,r in df.tail(2).iterrows()]
         except Exception:pass  # Evaluator supplies an explicit missing/stale reason.
+    if include_mag7 and out['qqq_bars']:
+        out.update(mag7_snapshot(out['qqq_bars'][-1]['bar_end']))
     return out
 
 

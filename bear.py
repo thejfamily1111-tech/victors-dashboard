@@ -1,46 +1,7 @@
-"""QQQ PUT rule engine. No network, broker orders, or automatic trading loop.
-
-Entry: fresh close across ORB15 low; close < EMA9 < EMA21; BB position >= .15;
-4/7 named Mag-7 red; completed, timestamped inputs no older than 180 seconds.
-RED is supplied by caller, using one consistent prior-session-close baseline.
-
-Exits: -20% from actual average option fill (fixed, not trailing), completed
-close above EMA21; +30% or defined BB extension scales floor(original_qty/2).
-After that quantity is FILLED, remaining contracts use an option break-even
-trigger and completed close above EMA9. One contract closes fully at target.
-BB extension: close < lower band AND width >= 1.10 * previous completed width.
-This 10% expansion definition is an explicit unvalidated design assumption.
-
-Caller supplies fresh option bid and aware timestamps; timestamps label candle
-END. First post-ORB entry can be 09:50 ET. No new entry at/after 15:00 ET;
-force_exit must be supplied for session flattening/early closes by an executor.
-
-VIC permission required in each entry data dictionary:
-  vic_permission = {"light": "GREEN" or "RED", "checked_at": aware ISO time,
-                    "valid_until": aware ISO time}
-checked_at must be <=60 seconds old and valid_until must be in the future.
-A news/VIX controller must produce this permission. Do not invent GREEN from an
-empty calendar or a missing feed. Red/unknown/stale blocks entries only. Exit
-management deliberately does not consult VIC permission. No news/VIX fetching
-or automatic news-release unlock is implemented in this module.
-
-RSI entry filter: 30 < QQQ RSI(14, Wilder, completed 5m) < 50.
-Supply rsi_14_5m and rsi_bar_end matching bar_end. Missing, NaN, out-of-range or
-mismatched RSI blocks new entries. calculate_rsi computes the latest RSI from
-oldest-to-newest completed closes. Use consistent prior-session warmup history;
-14 changes is only the mathematical minimum, not full convergence.
-RSI thresholds are configurable initial assumptions, not optimized settings.
-RSI never suppresses exits. No dashboard or data-feed wiring is included here.
-Both engines require fresh vic_permission with light/checked_at/valid_until.
-
-Durability/execution contract:
-- evaluate_entry/evaluate_exit propose actions; they never submit orders.
-- Call mark_entry_submitted only after recording broker submission intent.
-- An executor must cancel/reconcile entry remainder before exit orders.
-- Persist export_state atomically after every state mutation; restore on restart.
-- Report actual cumulative fills via confirm_exit_fill; a signal is NOT a fill.
-- With an exit pending, set exit_pending=True to prevent a second order.
-- Invalid/stale exit data returns DATA_UNAVAILABLE; executor must handle it.
+"""QQQ PUT rules. BB rejection -> EMA confirmation -> structural room.
+Paper-test assumptions, not optimized. See STRATEGY.md for exact formulas.
+Rule methods propose actions; run_paper.py handles actual simulated orders.
+RSI constructor arguments retained for compatibility; RSI is context only.
 """
 
 class BearPutExecutor:
@@ -119,73 +80,9 @@ class BearPutExecutor:
         import copy
         return copy.deepcopy(self.state)
 
-    def evaluate_mag_7_filter(self, mag_7_status):
-        return (all(mag_7_status.get(s) in {'GREEN', 'RED', 'FLAT'} for s in self.MAG7)
-                and sum(mag_7_status[s] == 'RED' for s in self.MAG7) >= 4)
-
-    def evaluate_bollinger_filter(self, price, lower_band, middle_band, upper_band):
-        try:
-            price, low, mid, high = map(self._num, (price, lower_band, middle_band, upper_band))
-            return 0 < low < mid < high and price > 0 and (price-low)/(high-low) >= .15
-        except (ValueError, TypeError):
-            return False
-
-    def evaluate_entry(self, data, mag_7_status, now=None):
-        from datetime import datetime, timedelta, timezone
-        result = {'action': 'WAIT', 'reasons': [], 'signal_id': None}
-        try:
-            now = self._time(now or datetime.now(timezone.utc))
-            # Entry permission is fail-closed. It never suppresses risk exits.
-            permission = data.get('vic_permission')
-            if not isinstance(permission, dict):
-                result['reasons'].append('VIC_PERMISSION_MISSING')
-            else:
-                if permission.get('light') != 'GREEN':
-                    result['reasons'].append('VIC_RED_OR_UNKNOWN')
-                try:
-                    self._fresh(permission['checked_at'], now, 60)
-                    if self._time(permission['valid_until']) <= now:
-                        raise ValueError('Expired permission')
-                except (KeyError, ValueError, TypeError):
-                    result['reasons'].append('VIC_PERMISSION_STALE_OR_INVALID')
-            end = self._fresh(data['bar_end'], now, 180)
-            prev_end = self._time(data['previous_bar_end'])
-            mag_end = self._fresh(data['mag7_bar_end'], now, 180)
-            orb_end = self._time(data['orb_end'])
-            if (data.get('bar_complete') is not True or end.minute % 5 or end.second or end.microsecond
-                or end - prev_end != timedelta(minutes=5) or mag_end != end):
-                raise ValueError('Incomplete or mismatched candles')
-            if (data.get('orb_locked') is not True or orb_end.date() != end.date()
-                or orb_end.strftime('%H:%M:%S') != '09:45:00' or end <= orb_end):
-                raise ValueError('ORB15 not locked or no post-range candle')
-            if now.date() != end.date() or now.weekday() >= 5 or not '09:50' <= now.strftime('%H:%M') < '15:00':
-                result['reasons'].append('OUTSIDE_ENTRY_WINDOW')
-            close, previous, orb, ema9, ema21 = [self._num(data[k]) for k in
-                ('price_close', 'previous_close', 'orb_low', 'ema_9_5m', 'ema_21_5m')]
-            if min(close, previous, orb, ema9, ema21) <= 0:
-                raise ValueError('Invalid price')
-            if not previous >= orb > close: result['reasons'].append('NO_FRESH_ORB_BREAKOUT')
-            if not close < ema9 < ema21: result['reasons'].append('PRICE_EMA_ALIGNMENT_FAILED')
-            if not self.evaluate_bollinger_filter(close, data['lower_bband'], data['middle_bband'], data['upper_bband']):
-                result['reasons'].append('BOLLINGER_FILTER_FAILED')
-            rsi = self._num(data['rsi_14_5m'])
-            if not 0 <= rsi <= 100 or self._time(data['rsi_bar_end']) != end:
-                raise ValueError('Invalid or mismatched RSI')
-            result['rsi_14_5m'] = rsi
-            result['rsi_limits'] = [self.rsi_min, self.rsi_max]
-            if not self.rsi_min < rsi < self.rsi_max:
-                result['reasons'].append('RSI_OUTSIDE_ENTRY_RANGE')
-            if not self.evaluate_mag_7_filter(mag_7_status): result['reasons'].append('MAG7_FILTER_FAILED_OR_MISSING')
-            signal = f'QQQ-PUT-{end.isoformat()}'
-            result['signal_id'] = signal
-            if signal in self.state['submitted_signals']: result['reasons'].append('SIGNAL_ALREADY_SUBMITTED')
-            if any(p['remaining_qty'] > 0 for p in self.state['positions'].values()):
-                result['reasons'].append('POSITION_ALREADY_OPEN')
-            if not result['reasons']: result['action'] = 'BUY_PUT_SIGNAL'
-        except (ValueError, TypeError, KeyError, OverflowError) as exc:
-            result['reasons'].append('INVALID_ENTRY_DATA: ' + str(exc))
-        self.last_entry_decision = result
-        return result
+    def evaluate_entry(self, data, mag_7_status=None, now=None):
+        from strategy_formula import evaluate
+        return evaluate(self, data, 'PUT', now)
 
     def check_put_execution_triggers(self, market_data_5m, mag_7_status):
         """Compatibility boolean wrapper; see last_entry_decision for reasons."""
@@ -227,6 +124,11 @@ class BearPutExecutor:
         if p['close_reason']: return decision('CLOSE_ALL', p['close_reason'], p['remaining_qty'])
         try:
             now = self._time(now or datetime.now(timezone.utc))
+            from strategy_formula import technical_exit
+            reason = technical_exit(self, p, data, 'PUT', now)
+            if reason:
+                p['close_reason'] = reason
+                return decision('CLOSE_ALL', reason, p['remaining_qty'])
             self._fresh(data['option_quote_timestamp'], now, 30)
             bid = self._num(data['option_bid'])
             if bid < 0: raise ValueError('Negative option bid')

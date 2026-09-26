@@ -3,7 +3,7 @@ Run: python3 -m streamlit run dashboard.py --server.address 127.0.0.1
 Keep next to vic.py, hero.py, bear.py, avatar_logo.png and your existing .env.
 DASHBOARD_PIN is mandatory; define it in .env or server Streamlit secrets.
 This dashboard never submits orders. It computes an informational VIC report;
-run vic.py separately to publish expiring vic_telemetry.json permissions.
+run run_paper.py --run --paper-orders for VIC/HERO/BEAR paper execution.
 Positions/orders come from optional hero_telemetry.json (or bot_telemetry.json)
 and bear_telemetry.json. Only explicitly permitted fields are rendered;
 account balances, buying power, equity and allocation figures are omitted.
@@ -114,7 +114,7 @@ def freshness(data, now):
 @st.cache_data(ttl=45, show_spinner=False)
 def fetch_bars(symbol=TICKER):
     import yfinance as yf
-    data = yf.Ticker(symbol).history(period='5d', interval='5m', prepost=False,
+    data = yf.Ticker(symbol).history(period='1mo', interval='5m', prepost=False,
                                     auto_adjust=False, actions=False, timeout=12, raise_errors=True)
     if data.empty:
         raise ValueError(f'Provider returned no candles for {symbol}')
@@ -221,6 +221,19 @@ def render_chart(df, days, bands, emas, vwap, symbol=TICKER):
                 if day == dates[-1]:
                     fig.add_annotation(x=session.index[-1].tz_localize(None), y=value,
                                        text=f'{name} {value:.2f}', showarrow=False, yshift=10)
+    if st.session_state.get('show_structure',True):
+        try:
+            layer=analysis_inputs(df)['structure'];price=float(df.Close.iloc[-1])
+            # Current snapshot only: short forward extensions prevent hindsight chart lines.
+            start=x[-1]+pd.Timedelta(minutes=5);finish=start+pd.Timedelta(minutes=15)
+            for z in nearest_zones(layer,price):
+                color='#00e676' if z['price']<=price else '#ff5252'
+                fig.add_trace(go.Scatter(x=[start,finish],y=[z['price'],z['price']],mode='lines',
+                    name=('S ' if z['price']<=price else 'R ')+f"{z['price']:.2f}",line=dict(color=color,dash='dot'),
+                    hovertemplate=', '.join(z['sources'])+'<br>%{y:.2f}<extra></extra>'))
+                if z['high']>z['low']:
+                    fig.add_shape(type='rect',x0=start,x1=finish,y0=z['low'],y1=z['high'],fillcolor=color,opacity=.15,line_width=0)
+        except (ValueError,KeyError,TypeError):pass
     fig.update_layout(template='plotly_dark', paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
                       height=520, margin=dict(l=10,r=15,t=25,b=15),
                       xaxis_rangeslider_visible=False, legend=dict(orientation='h', y=1.1),
@@ -237,6 +250,28 @@ def show_pipeline(hero, reports, now):
         state,_=freshness(data,now)
         st.markdown(f'#### {name.upper()} · QQQ Positions, Orders & Activity')
         st.caption(f'Report: {state}')
+        if data.get('paper') is True:
+            st.caption('ALPACA PAPER · simulated orders')
+        if isinstance(data.get('health'),str):st.write('Executor:',data['health'])
+        if isinstance(data.get('message'),str):st.caption(data['message'])
+        if isinstance(data.get('stock_feed'),str) and isinstance(data.get('option_feed'),str):
+            st.caption('Execution feeds: '+data['stock_feed']+' / '+data['option_feed']+' · dashboard charts may use a different source')
+        decision=data.get('decision')
+        if isinstance(decision,dict):
+            st.caption('Latest executor decision: '+str(decision.get('action','UNKNOWN')))
+            reasons=decision.get('reasons',[])
+            if isinstance(reasons,list):
+                for reason in reasons:
+                    if isinstance(reason,str):st.caption(reason)
+            if isinstance(decision.get('reason'),str):st.caption(decision['reason'])
+        if name=='hero' and isinstance(data.get('structure'),dict):
+            layer=data['structure']
+            with st.expander('Alpaca QQQ structure · executor snapshot'):
+                st.caption('Available at '+display_time(layer.get('asof'))+' · report '+state)
+                zones=layer.get('zones',[])
+                selected=(sorted([z for z in zones if z.get('side')=='SUPPORT'],key=lambda z:z['price'],reverse=True)[:3]
+                          +sorted([z for z in zones if z.get('side')=='RESISTANCE'],key=lambda z:z['price'])[:3])
+                if selected:st.dataframe([{'Side':z['side'],'Low':z['low'],'High':z['high'],'Sources':', '.join(z['sources'])} for z in selected],hide_index=True,width='stretch')
         if error:st.warning(error)
         orders=qqq_orders(data)
         rows=[]
@@ -268,7 +303,7 @@ def show_pipeline(hero, reports, now):
             if safe:
                 with st.expander(f'{name.upper()} activity history'):st.dataframe(safe,hide_index=True,width='stretch')
         if data and state!='RECENT REPORT':st.warning('This report is stale or unverified; records may be historical.')
-    st.caption('Orders and activities require reports from a running executor. The supplied HERO/BEAR classes evaluate rules and do not submit orders or create these reports.')
+    st.caption('Trade records above come from the executor reports. run_paper.py connects the HERO/BEAR rules to Alpaca paper orders. This dashboard does not start or stop that process.')
     return {}
 
 
@@ -314,58 +349,56 @@ def mag7_context(asof):
     return statuses,rows
 
 
+def analysis_inputs(df):
+    from market_structure import strategy_inputs
+    return strategy_inputs(df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'}))
+
+
+def nearest_zones(layer,price):
+    zones=layer.get('zones',[])
+    return (sorted([z for z in zones if z['price']<=price],key=lambda z:z['price'],reverse=True)[:3]
+            +sorted([z for z in zones if z['price']>price],key=lambda z:z['price'])[:3])
+
+
+def structure_panel(df,symbol):
+    st.markdown(f'#### {symbol} · Support & Resistance')
+    try:
+        layer=analysis_inputs(df)['structure'];price=float(df.Close.iloc[-1])
+        rows=[{'Side':'Support' if z['price']<=price else 'Resistance','Zone low':z['low'],'Zone high':z['high'],
+               'Level':z['price'],'Sources':', '.join(z['sources']),'Confirmed swing visits':z['visits']} for z in nearest_zones(layer,price)]
+        if rows:st.dataframe(rows,hide_index=True,width='stretch')
+        else:st.info('Insufficient completed history to establish levels.')
+        st.caption(f"Yahoo observation as of {display_time(layer['asof'])}. {layer['completed_sessions']} complete prior sessions available. Five-session 15m swings, prior session pivots and confirmed current-session levels; 20-session extremes appear only with enough history. Levels are zones, not guaranteed turning points.")
+        sd=layer.get('daily_sd')
+        if sd:
+            with st.expander('Five-day standard deviation · reference only'):
+                st.dataframe([{'Mean':sd['mean'],'Sample σ':sd['sample_std'],'Mean − 2σ':sd['minus_2s'],'Mean + 2σ':sd['plus_2s'],
+                               'Mean − 3σ':sd['minus_3s'],'Mean + 3σ':sd['plus_3s'],'Completed through':sd['through']}],hide_index=True,width='stretch')
+                st.caption('Five completed daily closes; sample standard deviation (n − 1). Multipliers apply after the square root. Separate from 20-bar Bollinger Bands; no entry veto.')
+    except (ValueError,KeyError,TypeError) as exc:st.info('Structure unavailable: '+str(exc))
+
+
 def rule_panel(df, vic_report=None):
     st.subheader('⚡ HERO & BEAR · Strategy Checklist')
-    st.caption('HERO and BEAR evaluations use the paired rule classes. A passed checklist is a signal observation, not an order or a running executor.')
+    st.caption('BB rejection → 9/21 EMA confirmation → support/resistance and ≥1.5R room. RSI is context; no mandatory ORB breakout or Mag-7 vote. Paper-test settings have not been optimized.')
     if df is None:
-        st.info('QQQ candles unavailable; rule evaluation paused.')
-        return
-    last=df.iloc[-1];ts=df.index[-1];orb=opening_range(df[df.index.date==ts.date()])
-    if not orb or any(pd.isna(last[k]) for k in ('EMA9','EMA21','BB_UPPER','BB_LOWER')):
-        st.info('A complete 15-minute opening range and indicator history are required.')
-        return
-    statuses,rows=mag7_context(ts)
-    st.dataframe(rows,hide_index=True,width='stretch')
-    st.caption('Mag-7 are context inputs only. GREEN means the same completed 5-minute close is above the prior regular-session close; confirm this baseline matches your intended rule.')
-    values={'price_close':float(last.Close),'orb_high':orb[0],'ema_9_5m':float(last.EMA9),
-            'ema_21_5m':float(last.EMA21),'lower_bband':float(last.BB_LOWER),
-            'middle_bband':float(last.BB_MID),'upper_bband':float(last.BB_UPPER), 'previous_close':float(df.Close.iloc[-2]),
-            'bar_end':(ts+pd.Timedelta(minutes=5)).isoformat(),
-            'previous_bar_end':(df.index[-2]+pd.Timedelta(minutes=5)).isoformat(),
-            'mag7_bar_end':(ts+pd.Timedelta(minutes=5)).isoformat(),
-            'orb_end':pd.Timestamp(f'{ts.date()} 09:45',tz=ET).isoformat(),
-            'orb_locked':True,'bar_complete':True, 'orb_low':orb[1],
-            'rsi_14_5m':float(last.RSI14), 'rsi_bar_end':(ts+pd.Timedelta(minutes=5)).isoformat(),
-            'vic_permission':mapping(vic_report).get('permission')}
-    width=values['upper_bband']-values['lower_bband']
-    ratio=(values['price_close']-values['lower_bband'])/width if width>0 else None
-    red=sum(x=='RED' for x in statuses.values());green=sum(x=='GREEN' for x in statuses.values())
-    for name,filename,classname,checks in [
-        ('HERO','hero.py','HeroCallExecutor',[
-            ('Fresh close across ORB15 high',df.Close.iloc[-2]<=orb[0]<last.Close),
-            ('Close > EMA9 > EMA21',last.Close>last.EMA9>last.EMA21),
-            ('BB position ≤ 0.85',ratio is not None and ratio<=.85),
-            ('At least four Mag-7 green',green>=4),('RSI14: 50 < RSI < 70',50<last.RSI14<70)]),
-        ('BEAR','bear.py','BearPutExecutor',[
-            ('Fresh close across ORB15 low',df.Close.iloc[-2]>=orb[1]>last.Close),
-            ('Close < EMA9 < EMA21',last.Close<last.EMA9<last.EMA21),
-            ('BB position ≥ 0.15',ratio is not None and ratio>=.15),
-            ('At least four Mag-7 red',red>=4),('RSI14: 30 < RSI < 50',30<last.RSI14<50)])]:
+        st.info('QQQ candles unavailable; rule evaluation paused.');return
+    try:
+        values=analysis_inputs(df);values['rsi_14_5m']=float(df.RSI14.iloc[-1])
+        values['vic_permission']=mapping(vic_report).get('permission')
+    except (ValueError,KeyError,TypeError) as exc:
+        st.info('Strategy data unavailable: '+str(exc));return
+    for name,filename,classname in [('HERO','hero.py','HeroCallExecutor'),('BEAR','bear.py','BearPutExecutor')]:
         st.markdown(f'#### {name} · QQQ entry checklist')
-        st.dataframe([{'Condition':label,'Result':'PASS' if passed else 'WAIT'} for label,passed in checks],hide_index=True,width='stretch')
-        if len(statuses)!=7:
-            st.warning(f'{name} evaluation unavailable: Mag-7 data missing.')
-            continue
         try:
-            cls=load_rule_class(filename,classname)
-            output=io.StringIO()
-            with contextlib.redirect_stdout(output):
-                result=cls(ticker='QQQ').evaluate_entry(values,statuses)
-            st.write(f'{name} rule result:',result['action'])
+            cls=load_rule_class(filename,classname);result=cls().evaluate_entry(values,{})
+            st.write('Yahoo observation:',result['action'])
             st.caption('Reasons: '+(', '.join(result['reasons']) or 'All entry checks passed'))
-        except Exception as exc:
-            st.warning(f'{name} evaluation unavailable ({type(exc).__name__}). Install the matching rule file from this package.')
-    st.caption(f'Evaluation bar: {ts+pd.Timedelta(minutes=5):%Y-%m-%d %H:%M} ET. Historical bars are not current signals. Missing or expired VIC permission blocks both entries.')
+            if result.get('signal_id'):
+                st.dataframe([{'Setup age (bars)':result.get('setup_age_bars'),'QQQ invalidation':result.get('stop_price'),
+                               'Next opposing level':result.get('target_level'),'Available room / QQQ risk':result.get('room_r')}],hide_index=True,width='stretch')
+        except Exception as exc:st.warning(f'{name} evaluation unavailable ({type(exc).__name__}). Install all matching Python files.')
+    st.caption('This Yahoo checklist is observational. The Alpaca executor decision in Positions, Orders & Activity is authoritative. Stale data or expired VIC permission blocks new orders; exits are evaluated independently.')
 
 
 @st.cache_data(ttl=60,show_spinner=False)
@@ -729,6 +762,7 @@ def main():
         auto=st.toggle('Auto-refresh · 15 seconds',value=True)
         st.markdown('### Chart overlays')
         bands=st.checkbox('Bollinger Bands · 20 / 2',True)
+        st.checkbox('Support & resistance',True,key='show_structure')
         emas=st.checkbox('9 / 21 EMA',True)
         vwap=st.checkbox('VWAP',True)
         if pin and st.button('Lock Terminal',width='stretch'):
@@ -792,6 +826,7 @@ def main():
                 with cols[4]: card(f'{selected_ticker} RSI · 14 / 5m',f'{last.RSI14:.1f}' if pd.notna(last.RSI14) else '—','Wilder · completed candles','#00e5ff')
                 st.subheader(f'📊 Tactical Intraday Structure: {selected_ticker}')
                 render_chart(df,days,bands,emas,vwap,selected_ticker)
+                structure_panel(df,selected_ticker)
                 st.caption(f'Yahoo Finance · may be delayed · last displayed session: {df.index[-1].date()}. Only completed regular-session candles. Indicators use available prior sessions for warmup.')
                 if df.index[-1].date()!=now.date(): st.info('Showing the latest available historical session, not today’s trading activity.')
                 elif (pd.Timestamp(now)-df.index[-1]-pd.Timedelta(minutes=5)).total_seconds()>180:

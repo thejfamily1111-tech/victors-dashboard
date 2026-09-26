@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "mode": "PAPER",
+  "account_hash": "229fea5a9935b3187eadeba3aac3f656da29ed96b13bada2a05329d3b882997c",
+  "orders": {},
+  "trade": null,
+  "rules": {
+    "hero": {
+      "version": 1,
+      "submitted_signals": [],
+      "positions": {}
+    },
+    "bear": {
+      "version": 1,
+      "strategy": "QQQ_PUT",
+      "submitted_signals": [],
+      "positions": {}
+    }
+  },
+  "day": {},
+  "activities": [],
+  "halt": null
+}
