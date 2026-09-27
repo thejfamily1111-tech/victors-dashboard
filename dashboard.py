@@ -519,7 +519,8 @@ def volatility_panel(vic_report):
     elif quote['kind'].startswith('Daily'):st.caption(f"{quote['source']} · {quote['kind']} · {quote['as_of']}. Display only; not a current trading quote.")
     else:st.caption(f"{quote['source']} · {quote['kind']} · {display_time(quote['as_of'])}. May be delayed; VIC separately checks freshness.")
     policy=mapping(mapping(vic_report).get('policy'))
-    if policy:st.caption(f"Entry gate: VIX below {policy.get('max_vix')} · post-release pause {policy.get('post_news_minutes')} minutes. Initial configurable rules, not optimized parameters.")
+    if policy:
+        st.caption(f"VIX allocation context: below 20 → 25%, 20 to below 30 → 50%, 30 or above → 80% of the configured paper budget. Post-release pause: {policy.get('post_news_minutes')} minutes. Actual order limits are enforced by the Mac executor.")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
