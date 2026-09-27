@@ -5,8 +5,8 @@ Calendar scope: Fed events, BLS releases, BEA releases; not every global event.
 Mag-7 breadth is advisory only; no count can grant or veto permission.
 News: reported material events may pause for 30m; WATCH never pauses.
 Routine headlines are hidden. Heuristics do not verify truth or actual impact.
-Policy defaults (unvalidated): VIX <35, 15m post-release pause, 2 completed
-5m bars confirming EMA trend after release. Override VIC_MAX_VIX and
+Policy defaults (unvalidated): VIX allocation tiers, 15m post-release pause, 2 completed
+5m bars confirming EMA trend after release. Override
 VIC_POST_NEWS_MINUTES in the existing .env. Missing required inputs => RED.
 Permission expires after 45s. RED applies to new entries, never position exits.
 """
@@ -395,17 +395,20 @@ def confirm_release(e,now=None):
 
 
 class VicRiskManager:
-    def __init__(self,total_account_balance=0.0,max_vix=None,post_news_minutes=None):
+    def __init__(self,total_account_balance=0.0,post_news_minutes=None):
         import os
         self.total_balance=float(total_account_balance)
-        self.max_vix=float(max_vix if max_vix is not None else os.getenv('VIC_MAX_VIX','35'))
         self.post_news_minutes=float(post_news_minutes if post_news_minutes is not None else os.getenv('VIC_POST_NEWS_MINUTES','15'))
-        if not 0<self.max_vix<200 or not 0<=self.post_news_minutes<=240:raise ValueError('Invalid VIC policy')
+        if not 0<=self.post_news_minutes<=240:raise ValueError('Invalid VIC policy')
 
-    def get_allocated_budget(self,vix_score):
+    @staticmethod
+    def allocation_fraction(vix_score):
         v=float(vix_score)
         if not 0<v<200:raise ValueError('Invalid VIX')
-        return self.total_balance*(.25 if v<20 else .50 if v<=30 else .80)
+        return .25 if v<20 else .50 if v<30 else .80
+
+    def get_allocated_budget(self,vix_score):
+        return self.total_balance*self.allocation_fraction(vix_score)
 
     def evaluate(self,context,market,now=None):
         now=stamp(now or datetime.now(ET));reasons=[];bias='UNKNOWN';vix=None
@@ -441,9 +444,10 @@ class VicRiskManager:
 
         try:
             vix=finite(market['vix'])
-            if not vix>0 or not 0<=(now-stamp(market['vix_at'])).total_seconds()<=600:raise ValueError()
-            if vix>=self.max_vix:reasons.append(f'VIX {vix:.2f} at/above limit {self.max_vix:g}')
-        except (ValueError,TypeError,KeyError):reasons.append('VIX missing, invalid or over 10 minutes old')
+            if not 0<vix<200 or not 0<=(now-stamp(market['vix_at'])).total_seconds()<=600:raise ValueError()
+        except (ValueError,TypeError,KeyError):
+            vix=None;reasons.append('VIX missing, invalid or over 10 minutes old')
+        vix_trend=market.get('vix_trend') if market.get('vix_trend') in {'RISING','FALLING','FLAT'} else 'UNKNOWN'
         bars=market.get('qqq_bars',[])
         try:
             if len(bars)<2:raise ValueError()
@@ -479,8 +483,9 @@ class VicRiskManager:
             deadlines.extend([stamp(market['vix_at'])+timedelta(seconds=600),stamp(bars[-1]['bar_end'])+timedelta(seconds=180),stamp(news['checked_at'])+timedelta(seconds=120)])
         return {'schema_version':1,'heartbeat':now.isoformat(),'health':light,'current_bias':bias,
                 'permission':{'light':light,'checked_at':now.isoformat(),'valid_until':min(deadlines).isoformat()},
-                'briefing':('; '.join(reasons) if reasons else 'Required macro inputs available; no active configured block. HERO/BEAR must still pass their own entry rules.')+' '+breadth_note+' News: only HIGH material-event reports can pause; WATCH is informational.',
-                'reasons':reasons,'vix':vix,'mag7':mag7,'news_alerts':alerts,'policy':{'max_vix':self.max_vix,'post_news_minutes':self.post_news_minutes},
+                'briefing':('; '.join(reasons) if reasons else 'Required macro inputs available; no active configured block. HERO/BEAR must still pass their own entry rules.')+' '+breadth_note+' VIX trend: '+vix_trend+' (volatility context, not QQQ direction). News: only HIGH material-event reports can pause; WATCH is informational.',
+                'reasons':reasons,'vix':vix,'vix_trend':vix_trend,'vix_allocation_fraction':self.allocation_fraction(vix) if vix is not None else None,
+                'mag7':mag7,'news_alerts':alerts,'policy':{'vix_tiers':{'under_20':.25,'20_to_under_30':.50,'30_and_above':.80},'post_news_minutes':self.post_news_minutes},
                 'events':context.get('events',[]),'news':news,'calendar_errors':context.get('calendar_errors',[]),
                 'calendar_sources':{s:{k:v for k,v in b.items() if k!='events'} for s,b in context.get('sources',{}).items()},
                 'scope':'Fed/BLS/BEA calendar + market-wide Yahoo Finance/CNBC/BBC Business RSS. Material-event heuristics are unverified headline triage, not comprehensive coverage or AI sentiment. Mag-7 is context only.'}
@@ -526,7 +531,10 @@ def market_snapshot(include_mag7=True):
             df=df.tz_convert(ET).sort_index()
             df=df[(df.index+pd.Timedelta(minutes=5)<=now)&(df.index.hour*60+df.index.minute>=570)&(df.index.hour*60+df.index.minute<960)]
             if df.empty or df.index.has_duplicates:raise ValueError('Missing/duplicate bars')
-            if symbol=='^VIX':out.update(vix=float(df.Close.iloc[-1]),vix_at=(df.index[-1]+pd.Timedelta(minutes=5)).isoformat())
+            if symbol=='^VIX':
+                current=float(df.Close.iloc[-1]);previous=float(df.Close.iloc[-2]) if len(df)>1 else current
+                out.update(vix=current,vix_at=(df.index[-1]+pd.Timedelta(minutes=5)).isoformat(),
+                           vix_trend='RISING' if current>previous else 'FALLING' if current<previous else 'FLAT')
             else:
                 df['ema9']=df.Close.ewm(span=9,adjust=False,min_periods=9).mean();df['ema21']=df.Close.ewm(span=21,adjust=False,min_periods=21).mean()
                 out['qqq_bars']=[{'bar_end':(ts+pd.Timedelta(minutes=5)).isoformat(),'close':float(r.Close),'ema9':float(r.ema9),'ema21':float(r.ema21)} for ts,r in df.tail(2).iterrows()]
