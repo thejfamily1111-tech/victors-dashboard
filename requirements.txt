@@ -4,3 +4,5 @@ pandas>=2.2,<3
 yfinance>=0.2.65,<2
 python-dotenv>=1,<2
 certifi>=2024.8.30
+
+reportlab>=4.2,<5

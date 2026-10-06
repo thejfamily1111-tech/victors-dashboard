@@ -1,14 +1,7 @@
-"""VIC QQQ macro monitor. Publishes entry permission; NEVER submits orders.
-Run: python3 vic.py (continuous) or python3 vic.py --once.
-The dashboard also evaluates VIC while open. All times are America/New_York.
-Calendar scope: Fed events, BLS releases, BEA releases; not every global event.
-Mag-7 breadth is advisory only; no count can grant or veto permission.
-News: reported material events may pause for 30m; WATCH never pauses.
-Routine headlines are hidden. Heuristics do not verify truth or actual impact.
-Policy defaults (unvalidated): VIX allocation tiers, 15m post-release pause, 2 completed
-5m bars confirming EMA trend after release. Override
-VIC_POST_NEWS_MINUTES in the existing .env. Missing required inputs => RED.
-Permission expires after 45s. RED applies to new entries, never position exits.
+"""VIC advisory desk for QQQ paper trading.
+News, VIX, and Mag-7 inform bias and briefing; they do not veto entries.
+Only regular market hours receive a GREEN permission lease.
+The executor separately validates candles, quotes, account, and order state.
 """
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -408,10 +401,17 @@ class VicRiskManager:
         return .25 if v<20 else .50 if v<30 else .80
 
     def get_allocated_budget(self,vix_score):
-        return self.total_balance*self.allocation_fraction(vix_score)
+        # Compatibility method: the paper premium ceiling does not depend on VIX.
+        return min(max(self.total_balance,0.0),10000.0)
 
     def evaluate(self,context,market,now=None):
         now=stamp(now or datetime.now(ET));reasons=[];bias='UNKNOWN';vix=None
+        # Explicit opt-in for the local paper executor only. Never applies to
+        # dashboard or standalone VIC evaluations and never makes missing data valid.
+        delayed_paper=market.get('paper_mode') is True and os.getenv('PAPER_ALLOW_DELAYED_DATA')=='1'
+        vix_max_age=1200 if delayed_paper else 600
+        qqq_max_age=330 if delayed_paper else 180
+        vix_age=None
         try:
             if not 0<=(now-stamp(context['checked_at'])).total_seconds()<=90:raise ValueError()
             if set(context['sources'])!=set(CALENDARS):raise ValueError()
@@ -444,15 +444,16 @@ class VicRiskManager:
 
         try:
             vix=finite(market['vix'])
-            if not 0<vix<200 or not 0<=(now-stamp(market['vix_at'])).total_seconds()<=600:raise ValueError()
+            vix_age=(now-stamp(market['vix_at'])).total_seconds()
+            if not 0<vix<200 or not 0<=vix_age<=vix_max_age:raise ValueError()
         except (ValueError,TypeError,KeyError):
-            vix=None;reasons.append('VIX missing, invalid or over 10 minutes old')
+            vix=None
         vix_trend=market.get('vix_trend') if market.get('vix_trend') in {'RISING','FALLING','FLAT'} else 'UNKNOWN'
         bars=market.get('qqq_bars',[])
         try:
             if len(bars)<2:raise ValueError()
             prev,last=bars[-2:];end=stamp(last['bar_end'])
-            if not 0<=(now-end).total_seconds()<=180 or (end-stamp(prev['bar_end'])).total_seconds()!=300:raise ValueError()
+            if not 0<=(now-end).total_seconds()<=qqq_max_age or (end-stamp(prev['bar_end'])).total_seconds()!=300:raise ValueError()
             if any(stamp(b['bar_end']).date()!=now.date() for b in (prev,last)):raise ValueError()
             for b in (prev,last):
                 ts=stamp(b['bar_end'])
@@ -461,6 +462,19 @@ class VicRiskManager:
             elif all(finite(b['close'])<finite(b['ema9'])<finite(b['ema21']) for b in (prev,last)):bias='BEARISH'
             else:bias='NEUTRAL'
         except (ValueError,TypeError,KeyError):reasons.append('QQQ completed candles missing or stale')
+        morning=market.get('premarket') or {}
+        try:
+            observed=stamp(morning['observed_at'])
+            if (morning['date']!=str(now.date()) or observed.date()!=now.date()
+                    or not (8,0)<=(observed.hour,observed.minute)<=(9,30)
+                    or morning['bias'] not in {'BULLISH','BEARISH','NEUTRAL'}
+                    or not -20<=finite(morning['change_pct'])<=20):
+                raise ValueError('Invalid premarket observation')
+        except (KeyError,ValueError,TypeError):morning={}
+        opening_bias=morning.get('bias','UNKNOWN')
+        comparison=('AGREES' if opening_bias in {'BULLISH','BEARISH'} and opening_bias==bias else 'CONFLICTS'
+                    if opening_bias in {'BULLISH','BEARISH'} and bias in {'BULLISH','BEARISH'}
+                    else 'UNCONFIRMED')
         today=[e for e in context.get('events',[]) if e['date']==str(now.date()) and e['impact']=='HIGH']
         for e in today:
             if not e.get('scheduled_at'):reasons.append(e['title']+': release time unconfirmed');continue
@@ -475,17 +489,25 @@ class VicRiskManager:
                 if bias not in {'BULLISH','BEARISH'} or any(stamp(b['bar_end'])-timedelta(minutes=5)<confirmed for b in bars[-2:]):
                     reasons.append(e['title']+': awaiting two full post-release trend candles')
             except (ValueError,KeyError):reasons.append('Post-release candles unavailable')
-        if now.weekday()>=5 or not (9,50)<=(now.hour,now.minute)<(15,0):reasons.append('Outside QQQ entry window (09:50–15:00 ET weekdays)')
-        reasons=list(dict.fromkeys(reasons));light='RED' if reasons else 'GREEN'
-        # Never issue a lease that extends past a required-input freshness deadline.
-        deadlines=[now+timedelta(seconds=45),now.replace(hour=15,minute=0,second=0,microsecond=0)]
-        if light=='GREEN':
-            deadlines.extend([stamp(market['vix_at'])+timedelta(seconds=600),stamp(bars[-1]['bar_end'])+timedelta(seconds=180),stamp(news['checked_at'])+timedelta(seconds=120)])
+        # Macro and breadth observations are advisory. The executor separately
+        # checks completed bars, option quotes, order ownership and market clock.
+        advisories=list(dict.fromkeys(reasons))
+        market_hours=now.weekday()<5 and (9,30)<=(now.hour,now.minute)<(16,0)
+        reasons=[] if market_hours else ['Outside regular QQQ session']
+        light='GREEN' if market_hours else 'RED'
+        allocation=None  # VIX is display context only; fixed budget belongs to executor.
+        delay_note=(f' PAPER DELAYED-DATA MODE: VIX age {vix_age:.0f}s; QQQ bar age {(now-stamp(bars[-1]["bar_end"])).total_seconds():.0f}s. '
+                    if delayed_paper and vix is not None and bars else '')
+        deadlines=[now+timedelta(seconds=45)]
+        if market_hours:deadlines.append(now.replace(hour=16,minute=0,second=0,microsecond=0))
         return {'schema_version':1,'heartbeat':now.isoformat(),'health':light,'current_bias':bias,
                 'permission':{'light':light,'checked_at':now.isoformat(),'valid_until':min(deadlines).isoformat()},
-                'briefing':('; '.join(reasons) if reasons else 'Required macro inputs available; no active configured block. HERO/BEAR must still pass their own entry rules.')+' '+breadth_note+' VIX trend: '+vix_trend+' (volatility context, not QQQ direction). News: only HIGH material-event reports can pause; WATCH is informational.',
-                'reasons':reasons,'vix':vix,'vix_trend':vix_trend,'vix_allocation_fraction':self.allocation_fraction(vix) if vix is not None else None,
-                'mag7':mag7,'news_alerts':alerts,'policy':{'vix_tiers':{'under_20':.25,'20_to_under_30':.50,'30_and_above':.80},'post_news_minutes':self.post_news_minutes},
+                'briefing':('Advisory: '+'; '.join(advisories) if advisories else 'Macro inputs available.')+delay_note+' '+breadth_note+' VIX trend: '+vix_trend+' (context only). Premarket QQQ: '+opening_bias+'; intraday comparison '+comparison+'. HERO/BEAR own entry and execution safety checks.',
+                'reasons':reasons,'vix':vix,'vix_trend':vix_trend,'vix_allocation_fraction':allocation,
+                'premarket':morning,'opening_bias':opening_bias,'premarket_vs_intraday':comparison,
+                'context_warnings':advisories,
+                'paper_delayed_data_mode':delayed_paper,'vix_age_seconds':vix_age,
+                'mag7':mag7,'news_alerts':alerts,'policy':{'paper_max_open_premium':10000,'post_news_minutes':self.post_news_minutes},
                 'events':context.get('events',[]),'news':news,'calendar_errors':context.get('calendar_errors',[]),
                 'calendar_sources':{s:{k:v for k,v in b.items() if k!='events'} for s,b in context.get('sources',{}).items()},
                 'scope':'Fed/BLS/BEA calendar + market-wide Yahoo Finance/CNBC/BBC Business RSS. Material-event heuristics are unverified headline triage, not comprehensive coverage or AI sentiment. Mag-7 is context only.'}

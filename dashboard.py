@@ -3,8 +3,8 @@ Run: python3 -m streamlit run dashboard.py --server.address 127.0.0.1
 Keep next to vic.py, hero.py, bear.py, avatar_logo.png and your existing .env.
 DASHBOARD_PIN is mandatory; define it in .env or server Streamlit secrets.
 This dashboard never submits orders. It computes an informational VIC report;
-run run_paper.py --run --paper-orders for VIC/HERO/BEAR paper execution.
-Positions/orders come from a configured private relay or local hero_telemetry.json (or bot_telemetry.json)
+run vic.py separately to publish expiring vic_telemetry.json permissions.
+Positions/orders come from optional hero_telemetry.json (or bot_telemetry.json)
 and bear_telemetry.json. Only explicitly permitted fields are rendered;
 account balances, buying power, equity and allocation figures are omitted.
 HERO/BEAR are loaded as class definitions; VIC is imported without running CLI.
@@ -84,7 +84,28 @@ def read_json(path):
         return None, f'{path.name}: {type(exc).__name__}; status unavailable'
 
 
+def setting(name, default=''):
+    value=os.getenv(name)
+    if value is not None:return value
+    try:return str(st.secrets.get(name,default))
+    except Exception:return default
+
+
+@st.cache_data(ttl=15,show_spinner=False)
+def remote_report():
+    from telemetry_link import fetch_remote
+    return fetch_remote(setting('TELEMETRY_URL'),setting('TELEMETRY_PUBLISHABLE_KEY'),setting('TELEMETRY_READ_TOKEN'))
+
+
 def load_status(name):
+    if setting('TELEMETRY_MODE','local')=='remote':
+        try:
+            envelope=remote_report()
+            if not envelope:return None,'No private telemetry received yet.','Supabase'
+            snapshot=envelope['snapshot']
+            value={'paper':True,'heartbeat':snapshot.get('observed_at'),'teams':snapshot.get('teams',[])} if name=='teams' else snapshot.get('supervisor') if name=='supervisor' else snapshot.get('vic') if name=='vic' else snapshot['reports'].get(name)
+            return value,None,'Supabase'
+        except Exception as exc:return None,f'Private telemetry unavailable ({type(exc).__name__}).','Supabase'
     paths = [BASE / f'{name}_telemetry.json']
     if name == 'hero':
         paths.append(BASE / 'bot_telemetry.json')
@@ -94,55 +115,6 @@ def load_status(name):
             data, error = read_json(path)
             return data, error, path.name
     return None, None, None
-
-
-def telemetry_setting(name, default=''):
-    value=os.getenv(name)
-    if value is not None:return value
-    try:return str(st.secrets.get(name,default))
-    except Exception:return default
-
-
-@st.cache_data(ttl=10,show_spinner=False)
-def remote_execution_report(url,key,token):
-    from telemetry_link import fetch_remote
-    return fetch_remote(url,key,token)
-
-
-def execution_reports(now):
-    mode=telemetry_setting('TELEMETRY_MODE','local').lower()
-    if mode=='local':
-        return {name:load_status(name) for name in ('hero','bear')}
-    unavailable={name:(None,'Remote execution report unavailable','private connection') for name in ('hero','bear')}
-    if mode!='remote':
-        st.error('Invalid TELEMETRY_MODE. Use local or remote.')
-        return unavailable
-    try:
-        envelope=remote_execution_report(telemetry_setting('TELEMETRY_URL'),
-            telemetry_setting('TELEMETRY_PUBLISHABLE_KEY'),telemetry_setting('TELEMETRY_READ_TOKEN'))
-    except Exception:
-        st.error('Private trading connection unavailable. Check the telemetry service and Streamlit secrets. No current positions can be confirmed.')
-        return unavailable
-    if envelope is None:
-        st.info('Private connection configured; waiting for the first upload from your Mac.')
-        return unavailable
-    snap=envelope['snapshot']
-    bridge_state,_=freshness({'heartbeat':snap.get('observed_at')},now)
-    st.caption('Private paper-trading connection · Mac upload: '+display_time(snap.get('observed_at'))+
-               ' · Server received: '+display_time(envelope.get('received_at')))
-    if bridge_state!='RECENT REPORT':
-        st.warning('Mac connection is stale or its clock is invalid. The records below are historical, not a confirmed current account view.')
-    v=snap.get('vic')
-    if isinstance(v,dict):
-        vic_state,_=freshness(v,now)
-        st.caption('VIC on Mac: '+str(v.get('health','UNKNOWN'))+' · Bias: '+str(v.get('current_bias','UNKNOWN'))+
-                   ' · '+vic_state+' · Last report: '+display_time(v.get('heartbeat')))
-    reports={}
-    for name in ('hero','bear'):
-        data=snap['reports'].get(name)
-        problem=None if data else 'No valid paper executor report received from the Mac.'
-        reports[name]=(data,problem,'private connection')
-    return reports
 
 
 def freshness(data, now):
@@ -163,7 +135,7 @@ def freshness(data, now):
 @st.cache_data(ttl=45, show_spinner=False)
 def fetch_bars(symbol=TICKER):
     import yfinance as yf
-    data = yf.Ticker(symbol).history(period='1mo', interval='5m', prepost=False,
+    data = yf.Ticker(symbol).history(period='5d', interval='5m', prepost=False,
                                     auto_adjust=False, actions=False, timeout=12, raise_errors=True)
     if data.empty:
         raise ValueError(f'Provider returned no candles for {symbol}')
@@ -190,7 +162,7 @@ def rsi_series(closes, period=14):
     return pd.Series(result,index=closes.index)
 
 
-def prepare_bars(raw, now):
+def prepare_bars(raw, now, minutes=5):
     df = raw.copy()
     required = ['Open', 'High', 'Low', 'Close', 'Volume']
     if not isinstance(df.index, pd.DatetimeIndex) or df.index.tz is None:
@@ -212,6 +184,10 @@ def prepare_bars(raw, now):
         (df.Low > df[['Open','Close','High']].min(axis=1)) |
         (df.Volume < 0) | (df.Close <= 0)).any():
         raise ValueError('Invalid OHLCV values')
+    from dashboard_metrics import aggregate_bars
+    df = aggregate_bars(df, minutes, now)
+    df.attrs['candle_minutes'] = minutes
+    df['EMA5'] = df.Close.ewm(span=5,adjust=False,min_periods=5).mean()
     # Continuous regular-session history provides indicator warmup across days.
     df['RSI14'] = rsi_series(df.Close)
     df['EMA9'] = df.Close.ewm(span=9, adjust=False, min_periods=9).mean()
@@ -242,43 +218,17 @@ def qqq_orders(data):
     return [o for o in rows if isinstance(o, dict) and o.get('ticker') == TICKER]
 
 
-def chart_bars(df, minutes=5):
-    """Aggregate complete regular-session bars; never change execution inputs."""
-    if minutes not in (5, 15, 30):
-        raise ValueError('Unsupported chart interval')
-    if minutes == 5:
-        return df.copy()
-    rule = f'{minutes}min'
-    grouped = df.resample(rule, origin='start_day', offset='9h30min',
-                          closed='left', label='left')
-    bars = grouped.agg({'Open':'first', 'High':'max', 'Low':'min',
-                        'Close':'last', 'Volume':'sum'})
-    # Require every constituent 5m candle; drop forming or incomplete groups.
-    bars = bars[grouped.Close.count() == minutes // 5].dropna()
-    if bars.empty:
-        return bars
-    chart = prepare_bars(bars, df.index[-1] + pd.Timedelta(minutes=5))
-    # Session VWAP stays based on the original 5m volume/price observations.
-    chart['VWAP'] = grouped.VWAP.last().reindex(chart.index)
-    return chart
-
-
-def render_chart(df, days, bands, emas, vwap, symbol=TICKER, minutes=5):
-    source = df
-    df = chart_bars(source, minutes)
-    if df.empty:
-        st.info('No complete candles available for this chart interval yet.')
-        return
+def render_chart(df, days, bands, emas, vwap, symbol=TICKER, orb_source=None):
     dates = sorted(set(df.index.date))[-days:]
     plot = df[[d in dates for d in df.index.date]].copy()
     # Naive Eastern labels ensure browser timezone cannot shift chart times.
     x = plot.index.tz_localize(None)
     fig = go.Figure(go.Candlestick(x=x, open=plot.Open, high=plot.High, low=plot.Low,
-                                  close=plot.Close, name=f'{symbol} · completed {minutes}m',
+                                  close=plot.Close, name=f'{symbol} · completed {df.attrs.get("candle_minutes",5)}m',
                                   increasing_line_color='#00e676', decreasing_line_color='#ff5252'))
     lines = []
     if emas:
-        lines += [('EMA9','#ffd600'), ('EMA21','#ff9100')]
+        lines += [('EMA5','#00e676'), ('EMA9','#ffd600'), ('EMA21','#ff9100')]
     if bands:
         lines += [('BB_UPPER','#8291bc'), ('BB_MID','#56617f'), ('BB_LOWER','#8291bc')]
     if vwap:
@@ -288,7 +238,8 @@ def render_chart(df, days, bands, emas, vwap, symbol=TICKER, minutes=5):
                                 line=dict(color=color, width=1.4)))
     for day in dates:
         session = plot[plot.index.date == day]
-        orb = opening_range(source[source.index.date == day])
+        source = orb_source[orb_source.index.date == day] if orb_source is not None else session
+        orb = opening_range(source)
         if orb:
             for value, color, name in [(orb[0],'#00e676','ORB15 High'), (orb[1],'#ff5252','ORB15 Low')]:
                 fig.add_shape(type='line', x0=f'{day} 09:45', x1=session.index[-1].tz_localize(None),
@@ -296,24 +247,11 @@ def render_chart(df, days, bands, emas, vwap, symbol=TICKER, minutes=5):
                 if day == dates[-1]:
                     fig.add_annotation(x=session.index[-1].tz_localize(None), y=value,
                                        text=f'{name} {value:.2f}', showarrow=False, yshift=10)
-    if st.session_state.get('show_structure',True):
-        try:
-            layer=analysis_inputs(source)['structure'];price=float(source.Close.iloc[-1])
-            # Current snapshot only: short forward extensions prevent hindsight chart lines.
-            start=source.index[-1].tz_localize(None)+pd.Timedelta(minutes=5);finish=start+pd.Timedelta(minutes=15)
-            for z in nearest_zones(layer,price):
-                color='#00e676' if z['price']<=price else '#ff5252'
-                fig.add_trace(go.Scatter(x=[start,finish],y=[z['price'],z['price']],mode='lines',
-                    name=('S ' if z['price']<=price else 'R ')+f"{z['price']:.2f}",line=dict(color=color,dash='dot'),
-                    hovertemplate=', '.join(z['sources'])+'<br>%{y:.2f}<extra></extra>'))
-                if z['high']>z['low']:
-                    fig.add_shape(type='rect',x0=start,x1=finish,y0=z['low'],y1=z['high'],fillcolor=color,opacity=.15,line_width=0)
-        except (ValueError,KeyError,TypeError):pass
     fig.update_layout(template='plotly_dark', paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
                       height=520, margin=dict(l=10,r=15,t=25,b=15),
                       xaxis_rangeslider_visible=False, legend=dict(orientation='h', y=1.1),
                       xaxis_title='Eastern time · completed candles', yaxis_title=f'{symbol} price',
-                      uirevision=f'{symbol}-{days}-{minutes}')
+                      uirevision=f'{symbol}-{days}-{df.attrs.get("candle_minutes",5)}')
     fig.update_xaxes(rangebreaks=[dict(bounds=['sat','mon']), dict(bounds=[16,9.5],pattern='hour')])
     st.plotly_chart(fig, width='stretch')
 
@@ -324,29 +262,7 @@ def show_pipeline(hero, reports, now):
         data,error,_=reports[name];data=mapping(data)
         state,_=freshness(data,now)
         st.markdown(f'#### {name.upper()} · QQQ Positions, Orders & Activity')
-        st.caption(f'Report: {state} · Last bot update: {display_time(data.get("heartbeat"))}')
-        if data.get('paper') is True:
-            st.caption('ALPACA PAPER · simulated orders')
-        if isinstance(data.get('health'),str):st.write('Executor:',data['health'])
-        if isinstance(data.get('message'),str):st.caption(data['message'])
-        if isinstance(data.get('stock_feed'),str) and isinstance(data.get('option_feed'),str):
-            st.caption('Execution feeds: '+data['stock_feed']+' / '+data['option_feed']+' · dashboard charts may use a different source')
-        decision=data.get('decision')
-        if isinstance(decision,dict):
-            st.caption('Latest executor decision: '+str(decision.get('action','UNKNOWN')))
-            reasons=decision.get('reasons',[])
-            if isinstance(reasons,list):
-                for reason in reasons:
-                    if isinstance(reason,str):st.caption(reason)
-            if isinstance(decision.get('reason'),str):st.caption(decision['reason'])
-        if name=='hero' and isinstance(data.get('structure'),dict):
-            layer=data['structure']
-            with st.expander('Alpaca QQQ structure · executor snapshot'):
-                st.caption('Available at '+display_time(layer.get('asof'))+' · report '+state)
-                zones=layer.get('zones',[])
-                selected=(sorted([z for z in zones if z.get('side')=='SUPPORT'],key=lambda z:z['price'],reverse=True)[:3]
-                          +sorted([z for z in zones if z.get('side')=='RESISTANCE'],key=lambda z:z['price'])[:3])
-                if selected:st.dataframe([{'Side':z['side'],'Low':z['low'],'High':z['high'],'Sources':', '.join(z['sources'])} for z in selected],hide_index=True,width='stretch')
+        st.caption(f'Report: {state}')
         if error:st.warning(error)
         orders=qqq_orders(data)
         rows=[]
@@ -378,8 +294,112 @@ def show_pipeline(hero, reports, now):
             if safe:
                 with st.expander(f'{name.upper()} activity history'):st.dataframe(safe,hide_index=True,width='stretch')
         if data and state!='RECENT REPORT':st.warning('This report is stale or unverified; records may be historical.')
-    st.caption('Trade records above come from the executor reports. run_paper.py connects the HERO/BEAR rules to Alpaca paper orders. This dashboard does not start or stop that process.')
+    st.caption('Orders and activities require reports from a running executor. The supplied HERO/BEAR classes evaluate rules and do not submit orders or create these reports.')
     return {}
+
+
+def show_market_direction(teams,now):
+    snapshots=[t.get('market_direction') for t in teams if t.get('market_direction',{}).get('mode')=='ACTIVE']
+    if not snapshots:
+        st.info('Waiting for active-context engine telemetry. Existing reports may belong to the six-team version.')
+        return
+    d=max(snapshots,key=lambda x:x.get('at') or '')
+    age=(now-pd.Timestamp(d['at']).to_pydatetime()).total_seconds() if d.get('at') else None
+    st.markdown('#### Active market direction')
+    if age is None or not 0<=age<=45:st.warning('Market context is stale; the values below are historical.')
+    a,b,c=st.columns(3)
+    a.metric('Direction',d.get('bias','UNKNOWN'))
+    score=d.get('score');b.metric('Direction score',f'{score:+.2f}' if score is not None else 'Unavailable')
+    coverage=d.get('coverage');c.metric('Input coverage',f'{coverage:.0%}' if coverage is not None else 'Unavailable')
+    st.caption('Score is a research rule, not a probability of profit. Context affects valid-signal priority, CALL/PUT selection when both qualify, position size, and confirmed adverse-thesis exits. It does not impose a macro entry veto.')
+    vote=d.get('mag7') or {}
+    st.caption(f"Mag-7: {int(vote.get('green') or 0)} green / {int(vote.get('red') or 0)} red / {int(vote.get('available') or 0)} available · two-candle confirmation: {bool(vote.get('confirmed'))}")
+    labels={'qqq':'QQQ price / EMA / VWAP','mag7':'Mag-7 breadth','volatility':'VXN/VIX change','treasury':'10-year yield direction or IEF proxy','semiconductors':'SMH momentum','news_event':'News / observed release reaction'}
+    st.dataframe([{'Input':labels[k],'Vote':v.get('value'),'Source':v.get('source_code'),'Observed ET':display_time(v.get('at'))} for k,v in d.get('factors',{}).items() if k in labels],hide_index=True,width='stretch')
+    if d.get('missing'):st.caption('No directional contribution: '+', '.join(labels.get(k,k) for k in d['missing']))
+
+
+def show_teams(now):
+    from telemetry_link import sanitize_teams
+    raw,error,source=load_status('teams')
+    teams=sanitize_teams(raw)
+    if error:st.warning(error)
+    if not teams:return False
+    st.subheader('QQQ paper teams · current strategies + report winners')
+    st.caption('Updated roster: 17 teams · $5,000 virtual allowance each · $30,000 combined open-premium cap after the new engine starts. Paper P&L shown here excludes fees.')
+    if len(teams)<17:st.info(f'{len(teams)} teams reported by the current runtime. Start the updated Mac engine and uploader to connect the full roster.')
+    show_market_direction(teams,now)
+    lookup={t['team_id']:t for t in teams}
+    from team_settings import NAMES
+    teams=[lookup.get(team,{'team_id':team,'label':label,'health':'NOT_CONNECTED','trades':[],'activities':[]}) for team,label in NAMES.items()]
+    # Two readable cards per row, including all report teams.
+    columns=[]
+    for offset in range(0,len(teams),2):columns.extend(st.columns(min(2,len(teams)-offset)))
+    for col,t in zip(columns,teams):
+        with col:
+            st.markdown('#### '+('Report '+t['team_id'][6:] if t['team_id'].startswith('report') else t['team_id'].replace('team','Team ')))
+            st.caption(t['label'])
+            from team_settings import REPORT_WINNERS
+            report_number=int(t['team_id'][6:]) if t['team_id'].startswith('report') else None
+            if report_number in REPORT_WINNERS:
+                _,minutes,trade_count,report_net=REPORT_WINNERS[report_number]
+                st.caption(f'2025 selection evidence: {trade_count} trades · simulated net ${report_net:+,.2f} · {minutes}m setup')
+                if trade_count<20:st.caption('Small historical sample; paper performance is still being measured.')
+            if t.get('exit_policy'):st.caption('Exits: '+t['exit_policy'])
+            st.caption(f"Entry allowance: {money(t.get('entry_budget'))} · one position per team")
+            age=(now-pd.Timestamp(t['heartbeat']).to_pydatetime()).total_seconds() if t.get('heartbeat') else None
+            st.caption(f"{t.get('day','—')} · {t['health']} · {source}")
+            if age is None or age>45 or age<0:st.warning('Stale team report — current performance is unverified.')
+            pnl=t.get('net_pnl')
+            realized=t.get('realized_pnl')
+            color='#28cf85' if pnl is not None and pnl>=0 else '#ff6464'
+            card('Net team P&L',f'${pnl:+,.2f}' if pnl is not None else 'Unpriced',
+                 'Realized + fresh bid valuation',color)
+            st.metric('Virtual equity',money(t.get('equity')) if t.get('equity') is not None else 'Unpriced')
+            st.caption(f"Realized: ${realized:+,.2f}" if realized is not None else 'Realized unavailable')
+            st.caption(f"Closed trades: {int(t.get('completed_trades') or 0)} · profitable: {int(t.get('wins') or 0)}")
+            with st.expander('What this team is checking'):
+                from team_settings import ENTRY_LABELS
+                st.write(ENTRY_LABELS.get(t.get('team_id'),'Strategy definition unavailable'))
+                m = t.get('metrics', {})
+                if m:
+                    st.caption('Completed candle: '+str(m.get('bar_end','unavailable'))+
+                               ' · '+str(m.get('candle_minutes') or 5)+' minutes')
+                    labels = {'price_close':'QQQ close','rsi_14_5m':'RSI14',
+                              'ema_5_5m':'EMA5','ema_9_5m':'EMA9','momentum_relative_volume':'Volume / previous 20 candles','previous_rsi_14_5m':'Previous RSI14','relative_volume':'Same-time relative volume',
+                              'session_vwap':'Session VWAP','vwap_slope_atr':'VWAP slope / ATR',
+                              'lower_bband':'Lower BB','middle_bband':'Middle BB','upper_bband':'Upper BB',
+                              'orb_high':'Opening-range high','orb_low':'Opening-range low','directional_efficiency':'Directional efficiency (0–1)','mean_range_atr':'Average range / ATR','chop_detected':'Chop detected (1=yes)'}
+                    st.dataframe([{'Metric':label,'Value':round(m[k],3) if isinstance(m.get(k),(float,int)) else 'Unavailable'}
+                                  for k,label in labels.items()],hide_index=True,width='stretch')
+                else: st.caption('Metrics unavailable until updated engine telemetry arrives.')
+                for owner,d in t.get('decisions',{}).items():
+                    st.caption(str(owner).upper()+': '+str(d.get('action','WAIT'))+' · '+
+                               str(d.get('reason') or ', '.join(d.get('reasons',[])) or 'Conditions passed'))
+                    levels = {k:d.get(k) for k in ('stop_price','target_level','room_r') if d.get(k) is not None}
+                    if levels: st.write(levels)
+            rows=[]
+            for p in t['trades']:
+                rows.append({'Bot':p['owner'],'Contract':p['symbol'],'Opened ET':display_time(p['entry_at']),
+                    'Closed ET':display_time(p['closed_at']) if p.get('closed_at') else 'OPEN',
+                    'Contracts':p['quantity'],'Remaining':p['remaining_qty'],'Entry $':p['entry_price'],
+                    'Exit VWAP $':p['exit_price'],'Option delta':p['option_delta'],
+                    'Realized P&L $':p['realized_pnl'],'Total P&L $':p['total_pnl'],
+                    'Entry market bias':p.get('market_entry',{}).get('bias'),
+                    'Context size factor':p.get('market_entry',{}).get('fraction')})
+            if rows:
+                frame=pd.DataFrame(rows)
+                def pnl_color(value):
+                    return 'color: #28cf85' if pd.notna(value) and value>=0 else 'color: #ff6464' if pd.notna(value) else ''
+                st.dataframe(frame.style.map(pnl_color,subset=['Realized P&L $','Total P&L $']),hide_index=True,width='stretch')
+            else:st.info('No filled entries today.')
+            with st.expander('Open / close fill activity'):
+                activity=[{'Time ET':display_time(a['timestamp']),'Bot':str(a['owner']).upper(),
+                    'Action':a['type'],'Contract':a['symbol'],'Qty':a['qty'],'Fill $':a['price'],
+                    'Realized P&L $':a['realized_pnl']} for a in t['activities']]
+                if activity:st.dataframe(activity,hide_index=True,width='stretch')
+                else:st.caption('No fills reported.')
+    return True
 
 
 MAG7 = ('MSFT','AAPL','NVDA','AMZN','GOOGL','META','TSLA')
@@ -424,56 +444,14 @@ def mag7_context(asof):
     return statuses,rows
 
 
-def analysis_inputs(df):
-    from market_structure import strategy_inputs
-    return strategy_inputs(df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'}))
-
-
-def nearest_zones(layer,price):
-    zones=layer.get('zones',[])
-    return (sorted([z for z in zones if z['price']<=price],key=lambda z:z['price'],reverse=True)[:3]
-            +sorted([z for z in zones if z['price']>price],key=lambda z:z['price'])[:3])
-
-
-def structure_panel(df,symbol):
-    st.markdown(f'#### {symbol} · Support & Resistance')
-    try:
-        layer=analysis_inputs(df)['structure'];price=float(df.Close.iloc[-1])
-        rows=[{'Side':'Support' if z['price']<=price else 'Resistance','Zone low':z['low'],'Zone high':z['high'],
-               'Level':z['price'],'Sources':', '.join(z['sources']),'Confirmed swing visits':z['visits']} for z in nearest_zones(layer,price)]
-        if rows:st.dataframe(rows,hide_index=True,width='stretch')
-        else:st.info('Insufficient completed history to establish levels.')
-        st.caption(f"Yahoo observation as of {display_time(layer['asof'])}. {layer['completed_sessions']} complete prior sessions available. Five-session 15m swings, prior session pivots and confirmed current-session levels; 20-session extremes appear only with enough history. Levels are zones, not guaranteed turning points.")
-        sd=layer.get('daily_sd')
-        if sd:
-            with st.expander('Five-day standard deviation · reference only'):
-                st.dataframe([{'Mean':sd['mean'],'Sample σ':sd['sample_std'],'Mean − 2σ':sd['minus_2s'],'Mean + 2σ':sd['plus_2s'],
-                               'Mean − 3σ':sd['minus_3s'],'Mean + 3σ':sd['plus_3s'],'Completed through':sd['through']}],hide_index=True,width='stretch')
-                st.caption('Five completed daily closes; sample standard deviation (n − 1). Multipliers apply after the square root. Separate from 20-bar Bollinger Bands; no entry veto.')
-    except (ValueError,KeyError,TypeError) as exc:st.info('Structure unavailable: '+str(exc))
-
-
 def rule_panel(df, vic_report=None):
-    st.subheader('⚡ HERO & BEAR · Strategy Checklist')
-    st.caption('BB rejection → 9/21 EMA confirmation → support/resistance and ≥1.5R room. RSI is context; no mandatory ORB breakout or Mag-7 vote. Paper-test settings have not been optimized.')
-    if df is None:
-        st.info('QQQ candles unavailable; rule evaluation paused.');return
-    try:
-        values=analysis_inputs(df);values['rsi_14_5m']=float(df.RSI14.iloc[-1])
-        values['vic_permission']=mapping(vic_report).get('permission')
-    except (ValueError,KeyError,TypeError) as exc:
-        st.info('Strategy data unavailable: '+str(exc));return
-    for name,filename,classname in [('HERO','hero.py','HeroCallExecutor'),('BEAR','bear.py','BearPutExecutor')]:
-        st.markdown(f'#### {name} · QQQ entry checklist')
-        try:
-            cls=load_rule_class(filename,classname);result=cls().evaluate_entry(values,{})
-            st.write('Yahoo observation:',result['action'])
-            st.caption('Reasons: '+(', '.join(result['reasons']) or 'All entry checks passed'))
-            if result.get('signal_id'):
-                st.dataframe([{'Setup age (bars)':result.get('setup_age_bars'),'QQQ invalidation':result.get('stop_price'),
-                               'Next opposing level':result.get('target_level'),'Available room / QQQ risk':result.get('room_r')}],hide_index=True,width='stretch')
-        except Exception as exc:st.warning(f'{name} evaluation unavailable ({type(exc).__name__}). Install all matching Python files.')
-    st.caption('This Yahoo checklist is observational. The Alpaca executor decision in Positions, Orders & Activity is authoritative. Stale data or expired VIC permission blocks new orders; exits are evaluated independently.')
+    from team_settings import NAMES, EXIT_LABELS, ENTRY_LABELS
+    from session_rules import ENTRY_WINDOW_LABEL
+    st.subheader('17-team strategy definitions')
+    st.caption(ENTRY_WINDOW_LABEL+' · Active market context influences direction, priority, size and new-position thesis exits')
+    for team,name in NAMES.items():
+        st.write(team.upper()+': '+name)
+        st.caption(ENTRY_LABELS[team]+' Exits: '+EXIT_LABELS[team])
 
 
 @st.cache_data(ttl=60,show_spinner=False)
@@ -490,7 +468,7 @@ def fetch_vix_display():
         closes=closes[closes.map(lambda v:pd.notna(v) and math.isfinite(v) and v>0)]
         if closes.empty:raise ValueError('No completed VIX values')
         ts=closes.index[-1]+pd.Timedelta(minutes=5)
-        return {'value':float(closes.iloc[-1]),'as_of':ts.isoformat(),'kind':'5-minute close','source':'Yahoo Finance','error':None}
+        return {'value':float(closes.iloc[-1]),'as_of':ts.isoformat(),'kind':'5-minute close','trend':('RISING' if len(closes)>1 and closes.iloc[-1]>closes.iloc[-2] else 'FALLING' if len(closes)>1 and closes.iloc[-1]<closes.iloc[-2] else 'FLAT'),'source':'Yahoo Finance','error':None}
     except Exception as exc:errors.append('Yahoo VIX: '+type(exc).__name__)
     try:
         import ssl,certifi
@@ -520,7 +498,7 @@ def volatility_panel(vic_report):
     else:st.caption(f"{quote['source']} · {quote['kind']} · {display_time(quote['as_of'])}. May be delayed; VIC separately checks freshness.")
     policy=mapping(mapping(vic_report).get('policy'))
     if policy:
-        st.caption(f"VIX allocation context: below 20 → 25%, 20 to below 30 → 50%, 30 or above → 80% of the configured paper budget. Post-release pause: {policy.get('post_news_minutes')} minutes. Actual order limits are enforced by the Mac executor.")
+        st.caption('The engine uses fresh volatility direction in its active score. This independent display is informational; engine input coverage is shown with the teams.')
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -737,7 +715,7 @@ def vic_dashboard_report(df, selected_ticker, now):
             market['qqq_bars']=[{'bar_end':(ts+pd.Timedelta(minutes=5)).isoformat(),'close':float(r.Close),'ema9':float(r.EMA9),'ema21':float(r.EMA21)} for ts,r in qqq.tail(2).iterrows()]
         quote=fetch_vix_display()
         if quote.get('value') is not None and quote.get('kind')=='5-minute close':
-            market.update(vix=quote['value'],vix_at=quote['as_of'])
+            market.update(vix=quote['value'],vix_at=quote['as_of'],vix_trend=quote.get('trend','UNKNOWN'))
         report=vm.VicRiskManager().evaluate(context,market)
     except Exception as exc:
         report={'health':'RED','current_bias':'UNKNOWN',
@@ -774,7 +752,7 @@ def news_calendar_panel(symbol,vic):
         if item.get('mode')=='LOCAL SNAPSHOT':
             st.info(f"{source}: saved calendar · imported {display_time(item.get('imported_at'))} · refresh before {display_time(item.get('expires_at'))}. Schedule changes since import are not reflected.")
     for error in vic.get('calendar_errors',[]):st.warning(error)
-    st.caption('HIGH events pause new entries from the start of the day until publication/completion is verified, the pause expires and QQQ confirms a trend. A Fed press conference requires verified completion; the clock alone does not unlock trading.')
+    st.caption('The active engine combines recent event evidence with observed QQQ reaction. Future calendar events do not predict direction or veto entries.')
     with st.expander('Calendar connection details'):
         for source,item in vic.get('calendar_sources',{}).items():
             st.write(source, item.get('error') or (item.get('mode','ONLINE')+' · checked '+display_time(item.get('checked_at'))))
@@ -785,7 +763,7 @@ def news_calendar_panel(symbol,vic):
     if news.get('error'):st.info(news['error'])
     elif news.get('checked_at'):st.caption('Feed fetched '+display_time(news['checked_at'])+' · headlines may be delayed and are not exhaustive.')
     for warning in news.get('warnings',[]):st.caption(warning)
-    st.caption('Positive/negative labels are provisional keyword flags. Either can pause new entries for 30 minutes while price action settles; a positive headline never authorizes a trade by itself.')
+    st.caption('These display labels are provisional keyword flags. Only the engine’s narrower, recent, price-confirmed news rules affect its active score; see team input coverage.')
     rows=[{'Published (Eastern)':display_time(n.get('published_at')),'Headline':n.get('title'),'VIC flag':n.get('signal','UNCLASSIFIED'),'Freshness':'Historical' if n.get('stale') else 'Recent',
            'Publisher':n.get('source'),'Article':n.get('url') if str(n.get('url','')).startswith(('https://','http://')) else None} for n in news.get('items',[])]
     if rows:st.dataframe(rows,hide_index=True,width='stretch',column_config={'Article':st.column_config.LinkColumn('Read article')})
@@ -838,8 +816,7 @@ def main():
         auto=st.toggle('Auto-refresh · 15 seconds',value=True)
         st.markdown('### Chart overlays')
         bands=st.checkbox('Bollinger Bands · 20 / 2',True)
-        st.checkbox('Support & resistance',True,key='show_structure')
-        emas=st.checkbox('9 / 21 EMA',True)
+        emas=st.checkbox('5 / 9 / 21 EMA',True)
         vwap=st.checkbox('VWAP',True)
         if pin and st.button('Lock Terminal',width='stretch'):
             st.session_state.authenticated=False
@@ -854,11 +831,12 @@ def main():
         return
     st.caption(f'Analysis: {selected_ticker} · HERO / BEAR trade universe: QQQ only. US regular-session charts use Eastern time.')
     days=c2.slider('Lookback (Sessions)',1,5,1)
+    chart_minutes=st.selectbox('Chart candle interval',[5,10,15],format_func=lambda n:f'{n} minutes')
 
     @st.fragment(run_every='15s' if auto else None)
     def body():
         now=datetime.now(ET)
-        reports=execution_reports(now)
+        reports={name:load_status(name) for name in ('hero','bear')}
         hero=reports['hero'][0]
         vic=None
         context=None
@@ -870,47 +848,73 @@ def main():
             data_error=f'{type(exc).__name__}: {selected_ticker} price data unavailable. Check the symbol and connection, then retry.'
         recent_bar='—' if df is None else (df.index[-1]+pd.Timedelta(minutes=5)).strftime('%b %d · %H:%M ET')
         esc=lambda x:html.escape(str(x))
-        st.markdown(f'<div class="status-bar"><div>{esc(selected_ticker)} &nbsp;|&nbsp; Last completed candle: <b>{esc(recent_bar)}</b></div>'
+        st.markdown(f'<div class="status-bar"><div>{esc(selected_ticker)} &nbsp;|&nbsp; Last completed 5m source candle: <b>{esc(recent_bar)}</b></div>'
                     f'<div>HERO: {esc(state)} &nbsp;|&nbsp; Dashboard: {now:%H:%M:%S} ET</div></div>',unsafe_allow_html=True)
         vic=vic_dashboard_report(df,selected_ticker,now)
+        executor_vic,_,_=load_status('vic')
+        if executor_vic and executor_vic.get('heartbeat'):
+            age=(now-pd.Timestamp(executor_vic['heartbeat']).to_pydatetime()).total_seconds()
+            if 0<=age<=60:
+                vic.update({k:executor_vic[k] for k in ('health','current_bias','permission','heartbeat','vix','vix_trend','mag7','news_alerts') if k in executor_vic})
         with st.expander('🏛️ VIC Desk Manager Briefing & Macro Bias',expanded=True):
             c1,c2=st.columns(2)
             c1.metric('New-entry permission',vic['health'])
             c2.metric('QQQ technical bias',vic['current_bias'])
             st.write(vic['briefing'])
-            st.caption('Rule-based briefing · market-wide headlines and official calendars. Bias describes completed QQQ price action, not AI sentiment. RED never blocks exits.')
+            st.caption('Active market direction is shown with engine telemetry below. News, volatility, Treasury and Mag-7 inputs influence decisions; market hours, quote quality and owned-contract checks still apply.')
             if vic.get('heartbeat'):st.caption('Evaluated '+display_time(vic['heartbeat']))
+        with st.expander('AI Supervisor · trade review',expanded=False):
+            import json
+            from pathlib import Path
+            report_path=Path(__file__).parent/'supervisor_report.json'
+            if report_path.exists():
+                report=json.loads(report_path.read_text())
+                st.caption('Read-only analysis · '+str(report.get('date',''))+' · 1–30 minute candles')
+                st.write(report.get('summary',''))
+                if report.get('ai'):
+                    st.caption('AI status: '+report['ai']['status'])
+                    st.write(report['ai'].get('text',''))
+                st.dataframe(report.get('comparisons',[]),hide_index=True)
+            elif load_status('supervisor')[0]:
+                sr=load_status('supervisor')[0]
+                st.caption(str(sr.get('date'))+' · '+str(sr.get('ai_status')))
+                st.write(sr.get('summary'))
+                if sr.get('ai_text'):st.write(sr['ai_text'])
+                st.dataframe(sr.get('recommendations',[]),hide_index=True)
+            else:
+                st.info('No supervisor report yet. Run ai_supervisor.py after the session with QQQ 1-minute data.')
         tab_analysis,tab_engine,tab_calendar=st.tabs(['📈 Deep-Dive Ticker Analysis','📉 VIX & Market Volatility','📅 Important Events & Market News'])
         with tab_analysis:
-            st.subheader('⚡ HERO & BEAR · Positions & Trading Activity')
-            snap=show_pipeline(hero,reports,now)
+            if not show_teams(now):
+                st.subheader('⚡ HERO & BEAR · Positions & Trading Activity')
+                show_pipeline(hero,reports,now)
             st.divider()
             st.subheader(f'⚡ Technical Confluence: {selected_ticker}')
             if df is None:
                 st.warning(data_error)
             else:
+                base_df=df
+                df=prepare_bars(fetch_bars(selected_ticker),now,chart_minutes)
                 last=df.iloc[-1]
+                from dashboard_metrics import volume_label, band_label, direction_label
+                vol_text,vol_note=volume_label(df)
+                bb_text,bb_note=band_label(last)
+                bias_text,bias_note=direction_label(vic)
                 session=df[df.index.date==df.index[-1].date()]
-                orb=opening_range(session)
+                orb=opening_range(base_df[base_df.index.date==df.index[-1].date()])
                 previous=df[df.index.date<df.index[-1].date()]
                 change=(last.Close/previous.Close.iloc[-1]-1)*100 if not previous.empty else None
                 cols=st.columns(5)
                 with cols[0]: card(f'{selected_ticker} · completed close',money(last.Close),f'{change:+.2f}% vs prior session close' if change is not None else 'Prior session unavailable','#00e5ff')
-                with cols[1]: card('EMA alignment','Bullish' if last.EMA9>last.EMA21 else 'Bearish' if last.EMA9<last.EMA21 else 'Unavailable / flat','9 EMA vs 21 EMA')
-                with cols[2]: card('Bollinger Band Width',f'{last.BB_WIDTH:.2f}%' if pd.notna(last.BB_WIDTH) else '—','20 completed bars · 2σ')
-                with cols[3]: card('15-Minute ORB','Locked' if orb else 'Incomplete','09:30–09:45 ET · chart session')
-                with cols[4]: card(f'{selected_ticker} RSI · 14 / 5m',f'{last.RSI14:.1f}' if pd.notna(last.RSI14) else '—','Wilder · completed candles','#00e5ff')
+                with cols[1]: card('Market direction · VIC',bias_text,bias_note)
+                with cols[2]: card('Bollinger price position',bb_text,bb_note)
+                with cols[3]: card('Volume',vol_text,vol_note)
+                with cols[4]: card(f'{selected_ticker} RSI · 14 / {chart_minutes}m',f'{last.RSI14:.1f}' if pd.notna(last.RSI14) else '—','Wilder · completed candles','#00e5ff')
                 st.subheader(f'📊 Tactical Intraday Structure: {selected_ticker}')
-                chart_minutes = st.selectbox('Chart candle interval', [5, 15, 30],
-                    format_func=lambda value: f'{value} minutes', key='chart_minutes')
-                st.caption(f'Chart: {chart_minutes}-minute candles, EMAs and Bollinger Bands. '
-                           'Trading signals and technical cards remain on 5 minutes. '
-                           'ORB stays 15 minutes; support/resistance levels and session VWAP retain their original calculation.')
-                render_chart(df,days,bands,emas,vwap,selected_ticker,chart_minutes)
-                structure_panel(df,selected_ticker)
-                st.caption(f'Yahoo Finance · may be delayed · last displayed session: {df.index[-1].date()}. Only completed regular-session candles. Indicators use available prior sessions for warmup.')
+                render_chart(df,days,bands,emas,vwap,selected_ticker,orb_source=base_df)
+                st.caption(f'{chart_minutes}-minute chart · last candle ends {(df.index[-1]+pd.Timedelta(minutes=chart_minutes)):%H:%M} ET · Yahoo Finance · may be delayed · last displayed session: {df.index[-1].date()}. Only completed regular-session candles. Indicators use available prior sessions for warmup.')
                 if df.index[-1].date()!=now.date(): st.info('Showing the latest available historical session, not today’s trading activity.')
-                elif (pd.Timestamp(now)-df.index[-1]-pd.Timedelta(minutes=5)).total_seconds()>180:
+                elif (pd.Timestamp(now)-df.index[-1]-pd.Timedelta(minutes=chart_minutes)).total_seconds()>180:
                     st.info('The latest completed candle is over 3 minutes old. Session may have ended or the feed may be delayed.')
                 with st.expander('🔬 Indicator Values & Opening Range',expanded=False):
                     st.dataframe([{'Close':last.Close,'EMA9':last.EMA9,'EMA21':last.EMA21,'RSI14':last.RSI14,'VWAP':last.VWAP,
@@ -925,6 +929,9 @@ def main():
                 try: qqq_df=prepare_bars(fetch_bars(TICKER),now)
                 except Exception: pass
             rule_panel(qqq_df,vic)
+            with st.expander("Saved simulation experiments",expanded=False):
+                from simulation_lab import render
+                render()
         with tab_calendar:
             news_calendar_panel(selected_ticker,vic)
         st.markdown('<div class="footer-note">Victor Terminal · QQQ monitor · Market observations and executor reports are separate data sources. Account balances are hidden.</div>',unsafe_allow_html=True)
