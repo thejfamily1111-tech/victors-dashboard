@@ -6,7 +6,8 @@ This dashboard never submits orders. It computes an informational VIC report;
 run vic.py separately to publish expiring vic_telemetry.json permissions.
 Positions/orders come from optional hero_telemetry.json (or bot_telemetry.json)
 and bear_telemetry.json. Only explicitly permitted fields are rendered;
-account balances, buying power, equity and allocation figures are omitted.
+broker account balances and buying power are omitted. Team virtual allowances
+and invested option premium are display-only and never grant order permission.
 HERO/BEAR are loaded as class definitions; VIC is imported without running CLI.
 """
 from datetime import datetime
@@ -218,42 +219,43 @@ def qqq_orders(data):
     return [o for o in rows if isinstance(o, dict) and o.get('ticker') == TICKER]
 
 
-def render_chart(df, days, bands, emas, vwap, symbol=TICKER, orb_source=None):
-    dates = sorted(set(df.index.date))[-days:]
-    plot = df[[d in dates for d in df.index.date]].copy()
-    # Naive Eastern labels ensure browser timezone cannot shift chart times.
-    x = plot.index.tz_localize(None)
-    fig = go.Figure(go.Candlestick(x=x, open=plot.Open, high=plot.High, low=plot.Low,
-                                  close=plot.Close, name=f'{symbol} · completed {df.attrs.get("candle_minutes",5)}m',
-                                  increasing_line_color='#00e676', decreasing_line_color='#ff5252'))
-    lines = []
-    if emas:
-        lines += [('EMA5','#00e676'), ('EMA9','#ffd600'), ('EMA21','#ff9100')]
-    if bands:
-        lines += [('BB_UPPER','#8291bc'), ('BB_MID','#56617f'), ('BB_LOWER','#8291bc')]
-    if vwap:
-        lines += [('VWAP','#00d9ff')]
-    for key, color in lines:
-        fig.add_trace(go.Scatter(x=x, y=plot[key], name=key.replace('_',' '),
-                                line=dict(color=color, width=1.4)))
-    for day in dates:
-        session = plot[plot.index.date == day]
-        source = orb_source[orb_source.index.date == day] if orb_source is not None else session
-        orb = opening_range(source)
-        if orb:
-            for value, color, name in [(orb[0],'#00e676','ORB15 High'), (orb[1],'#ff5252','ORB15 Low')]:
-                fig.add_shape(type='line', x0=f'{day} 09:45', x1=session.index[-1].tz_localize(None),
-                              y0=value, y1=value, line=dict(color=color, dash='dash', width=1.5))
-                if day == dates[-1]:
-                    fig.add_annotation(x=session.index[-1].tz_localize(None), y=value,
-                                       text=f'{name} {value:.2f}', showarrow=False, yshift=10)
-    fig.update_layout(template='plotly_dark', paper_bgcolor='#0e1117', plot_bgcolor='#0e1117',
-                      height=520, margin=dict(l=10,r=15,t=25,b=15),
-                      xaxis_rangeslider_visible=False, legend=dict(orientation='h', y=1.1),
-                      xaxis_title='Eastern time · completed candles', yaxis_title=f'{symbol} price',
-                      uirevision=f'{symbol}-{days}-{df.attrs.get("candle_minutes",5)}')
-    fig.update_xaxes(rangebreaks=[dict(bounds=['sat','mon']), dict(bounds=[16,9.5],pattern='hour')])
-    st.plotly_chart(fig, width='stretch')
+def chart_figure(df, days, bands=True, vwap=False, symbol=TICKER, rsi=True, volume=True, ema9=False, ema21=False):
+    from plotly.subplots import make_subplots
+    dates=sorted(set(df.index.date))[-days:]
+    plot=df[[day in dates for day in df.index.date]]
+    x=plot.index.tz_localize(None)
+    rows=1+int(rsi)+int(volume)
+    heights=[.6]+([.22] if rsi else [])+([.18] if volume else [])
+    fig=make_subplots(rows=rows,cols=1,shared_xaxes=True,vertical_spacing=.035,row_heights=heights)
+    fig.add_trace(go.Candlestick(x=x,open=plot.Open,high=plot.High,low=plot.Low,close=plot.Close,
+                  name=symbol,increasing_line_color='#28cf85',decreasing_line_color='#ff6464'),row=1,col=1)
+    lines=[]
+    if bands:lines += [('BB_UPPER','#8291bc'),('BB_MID','#56617f'),('BB_LOWER','#8291bc')]
+    if ema9:lines.append(('EMA9','#ffd600'))
+    if ema21:lines.append(('EMA21','#ff9100'))
+    if vwap:lines.append(('VWAP','#00d9ff'))
+    for key,color in lines:
+        fig.add_trace(go.Scatter(x=x,y=plot[key],name=key.replace('_',' '),line=dict(color=color,width=1.3)),row=1,col=1)
+    row=2
+    if rsi:
+        fig.add_trace(go.Scatter(x=x,y=plot.RSI14,name='RSI 14',line=dict(color='#aa91ff')),row=row,col=1)
+        fig.add_hline(y=70,line_dash='dot',line_color='#ff6464',row=row,col=1)
+        fig.add_hline(y=30,line_dash='dot',line_color='#28cf85',row=row,col=1)
+        fig.update_yaxes(range=[0,100],title_text='RSI 14',row=row,col=1);row+=1
+    if volume:
+        fig.add_trace(go.Bar(x=x,y=plot.Volume,name='Volume',marker_color=['#28cf85' if c>=o else '#ff6464' for c,o in zip(plot.Close,plot.Open)]),row=row,col=1)
+        fig.update_yaxes(title_text='Volume',row=row,col=1)
+    fig.update_layout(template='plotly_dark',paper_bgcolor='#0e1117',plot_bgcolor='#0e1117',height=720 if rows>1 else 500,
+                     margin=dict(l=10,r=15,t=35,b=20),legend=dict(orientation='h',y=1.06),
+                     uirevision=f'{symbol}-{days}-{df.attrs.get("candle_minutes",5)}')
+    fig.update_xaxes(rangeslider_visible=False,rangebreaks=[dict(bounds=['sat','mon']),dict(bounds=[16,9.5],pattern='hour')])
+    fig.update_xaxes(title_text='Eastern time · completed candles',row=rows,col=1)
+    fig.update_yaxes(title_text=symbol+' price',row=1,col=1)
+    return fig
+
+
+def render_chart(df, days, bands, emas, vwap, symbol=TICKER, orb_source=None, rsi=True, volume=True, ema9=False, ema21=False):
+    st.plotly_chart(chart_figure(df,days,bands,vwap,symbol,rsi,volume,ema9 or emas,ema21 or emas),width='stretch')
 
 
 def show_pipeline(hero, reports, now):
@@ -797,145 +799,23 @@ def main():
             else: st.error('Invalid PIN.')
         st.stop()
     with st.sidebar:
-        if (BASE/'avatar_logo.png').is_file(): st.image(str(BASE/'avatar_logo.png'),width='stretch')
+        if (BASE/'avatar_logo.png').is_file():st.image(str(BASE/'avatar_logo.png'),width='stretch')
         st.markdown('## VICTOR TERMINAL')
-        st.caption('QQQ · HERO / BEAR / VIC')
-        st.divider()
-        st.markdown('### Trading Desk')
-        st.caption('QQQ calls · HERO | QQQ puts · BEAR')
-        st.caption('Positions, orders and activity are shown when an executor reports them. Account balances and allocation amounts are hidden.')
-        st.markdown('### Macro Officer · VIC')
-        st.caption('Market news · Fed / BLS / BEA calendars')
+        st.caption('Paper trading · QQQ · shared VIC context')
+        auto=st.toggle('Auto-refresh · 15 seconds',value=True)
         if st.button('Refresh market data',width='stretch'):
-            fetch_bars.clear()
-            fetch_vix_display.clear()
-            fetch_fundamentals.clear()
-            fetch_earnings.clear()
+            st.cache_data.clear()
             try:vic_module().CACHE.clear()
             except Exception:pass
-        auto=st.toggle('Auto-refresh · 15 seconds',value=True)
-        st.markdown('### Chart overlays')
-        bands=st.checkbox('Bollinger Bands · 20 / 2',True)
-        emas=st.checkbox('5 / 9 / 21 EMA',True)
-        vwap=st.checkbox('VWAP',True)
-        if pin and st.button('Lock Terminal',width='stretch'):
+        if st.button('Lock Terminal',width='stretch'):
             st.session_state.authenticated=False
             st.rerun()
-        st.caption('Monitor only · no order buttons')
+        st.caption('Monitor only · no order controls')
     st.title('⚡ Victor Terminal')
-    st.caption('Apex Quantitative Intelligence Terminal | QQQ Execution Monitor · Macro build 2026-09-26')
-    c1,c2=st.columns(2)
-    selected_ticker=c1.text_input('Asset Ticker Symbol',value=TICKER,key='analysis_ticker',help='Enter a stock or ETF symbol and press Enter. This changes analysis only; trading remains QQQ.').strip().upper()
-    if not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-]{0,14}',selected_ticker):
-        st.info('Enter a valid stock or ETF ticker, such as AAPL, NVDA, TSLA or QQQ.')
-        return
-    st.caption(f'Analysis: {selected_ticker} · HERO / BEAR trade universe: QQQ only. US regular-session charts use Eastern time.')
-    days=c2.slider('Lookback (Sessions)',1,5,1)
-    chart_minutes=st.selectbox('Chart candle interval',[5,10,15],format_func=lambda n:f'{n} minutes')
-
-    @st.fragment(run_every='15s' if auto else None)
-    def body():
-        now=datetime.now(ET)
-        reports={name:load_status(name) for name in ('hero','bear')}
-        hero=reports['hero'][0]
-        vic=None
-        context=None
-        state,_=freshness(hero,now)
-        data_error=None
-        try: df=prepare_bars(fetch_bars(selected_ticker),now)
-        except Exception as exc:
-            df=None
-            data_error=f'{type(exc).__name__}: {selected_ticker} price data unavailable. Check the symbol and connection, then retry.'
-        recent_bar='—' if df is None else (df.index[-1]+pd.Timedelta(minutes=5)).strftime('%b %d · %H:%M ET')
-        esc=lambda x:html.escape(str(x))
-        st.markdown(f'<div class="status-bar"><div>{esc(selected_ticker)} &nbsp;|&nbsp; Last completed 5m source candle: <b>{esc(recent_bar)}</b></div>'
-                    f'<div>HERO: {esc(state)} &nbsp;|&nbsp; Dashboard: {now:%H:%M:%S} ET</div></div>',unsafe_allow_html=True)
-        vic=vic_dashboard_report(df,selected_ticker,now)
-        executor_vic,_,_=load_status('vic')
-        if executor_vic and executor_vic.get('heartbeat'):
-            age=(now-pd.Timestamp(executor_vic['heartbeat']).to_pydatetime()).total_seconds()
-            if 0<=age<=60:
-                vic.update({k:executor_vic[k] for k in ('health','current_bias','permission','heartbeat','vix','vix_trend','mag7','news_alerts') if k in executor_vic})
-        with st.expander('🏛️ VIC Desk Manager Briefing & Macro Bias',expanded=True):
-            c1,c2=st.columns(2)
-            c1.metric('New-entry permission',vic['health'])
-            c2.metric('QQQ technical bias',vic['current_bias'])
-            st.write(vic['briefing'])
-            st.caption('Active market direction is shown with engine telemetry below. News, volatility, Treasury and Mag-7 inputs influence decisions; market hours, quote quality and owned-contract checks still apply.')
-            if vic.get('heartbeat'):st.caption('Evaluated '+display_time(vic['heartbeat']))
-        with st.expander('AI Supervisor · trade review',expanded=False):
-            import json
-            from pathlib import Path
-            report_path=Path(__file__).parent/'supervisor_report.json'
-            if report_path.exists():
-                report=json.loads(report_path.read_text())
-                st.caption('Read-only analysis · '+str(report.get('date',''))+' · 1–30 minute candles')
-                st.write(report.get('summary',''))
-                if report.get('ai'):
-                    st.caption('AI status: '+report['ai']['status'])
-                    st.write(report['ai'].get('text',''))
-                st.dataframe(report.get('comparisons',[]),hide_index=True)
-            elif load_status('supervisor')[0]:
-                sr=load_status('supervisor')[0]
-                st.caption(str(sr.get('date'))+' · '+str(sr.get('ai_status')))
-                st.write(sr.get('summary'))
-                if sr.get('ai_text'):st.write(sr['ai_text'])
-                st.dataframe(sr.get('recommendations',[]),hide_index=True)
-            else:
-                st.info('No supervisor report yet. Run ai_supervisor.py after the session with QQQ 1-minute data.')
-        tab_analysis,tab_engine,tab_calendar=st.tabs(['📈 Deep-Dive Ticker Analysis','📉 VIX & Market Volatility','📅 Important Events & Market News'])
-        with tab_analysis:
-            if not show_teams(now):
-                st.subheader('⚡ HERO & BEAR · Positions & Trading Activity')
-                show_pipeline(hero,reports,now)
-            st.divider()
-            st.subheader(f'⚡ Technical Confluence: {selected_ticker}')
-            if df is None:
-                st.warning(data_error)
-            else:
-                base_df=df
-                df=prepare_bars(fetch_bars(selected_ticker),now,chart_minutes)
-                last=df.iloc[-1]
-                from dashboard_metrics import volume_label, band_label, direction_label
-                vol_text,vol_note=volume_label(df)
-                bb_text,bb_note=band_label(last)
-                bias_text,bias_note=direction_label(vic)
-                session=df[df.index.date==df.index[-1].date()]
-                orb=opening_range(base_df[base_df.index.date==df.index[-1].date()])
-                previous=df[df.index.date<df.index[-1].date()]
-                change=(last.Close/previous.Close.iloc[-1]-1)*100 if not previous.empty else None
-                cols=st.columns(5)
-                with cols[0]: card(f'{selected_ticker} · completed close',money(last.Close),f'{change:+.2f}% vs prior session close' if change is not None else 'Prior session unavailable','#00e5ff')
-                with cols[1]: card('Market direction · VIC',bias_text,bias_note)
-                with cols[2]: card('Bollinger price position',bb_text,bb_note)
-                with cols[3]: card('Volume',vol_text,vol_note)
-                with cols[4]: card(f'{selected_ticker} RSI · 14 / {chart_minutes}m',f'{last.RSI14:.1f}' if pd.notna(last.RSI14) else '—','Wilder · completed candles','#00e5ff')
-                st.subheader(f'📊 Tactical Intraday Structure: {selected_ticker}')
-                render_chart(df,days,bands,emas,vwap,selected_ticker,orb_source=base_df)
-                st.caption(f'{chart_minutes}-minute chart · last candle ends {(df.index[-1]+pd.Timedelta(minutes=chart_minutes)):%H:%M} ET · Yahoo Finance · may be delayed · last displayed session: {df.index[-1].date()}. Only completed regular-session candles. Indicators use available prior sessions for warmup.')
-                if df.index[-1].date()!=now.date(): st.info('Showing the latest available historical session, not today’s trading activity.')
-                elif (pd.Timestamp(now)-df.index[-1]-pd.Timedelta(minutes=chart_minutes)).total_seconds()>180:
-                    st.info('The latest completed candle is over 3 minutes old. Session may have ended or the feed may be delayed.')
-                with st.expander('🔬 Indicator Values & Opening Range',expanded=False):
-                    st.dataframe([{'Close':last.Close,'EMA9':last.EMA9,'EMA21':last.EMA21,'RSI14':last.RSI14,'VWAP':last.VWAP,
-                                   'Upper band':last.BB_UPPER,'Lower band':last.BB_LOWER,
-                                   'ORB15 high':orb[0] if orb else None,'ORB15 low':orb[1] if orb else None}],hide_index=True,width='stretch')
-            financial_panel(selected_ticker)
-            fund_sections(df,selected_ticker)
-        with tab_engine:
-            volatility_panel(vic)
-            qqq_df=df if selected_ticker==TICKER else None
-            if selected_ticker!=TICKER:
-                try: qqq_df=prepare_bars(fetch_bars(TICKER),now)
-                except Exception: pass
-            rule_panel(qqq_df,vic)
-            with st.expander("Saved simulation experiments",expanded=False):
-                from simulation_lab import render
-                render()
-        with tab_calendar:
-            news_calendar_panel(selected_ticker,vic)
-        st.markdown('<div class="footer-note">Victor Terminal · QQQ monitor · Market observations and executor reports are separate data sources. Account balances are hidden.</div>',unsafe_allow_html=True)
-    body()
+    st.caption('Market overview · paper teams · news & events · research')
+    import sys
+    from dashboard_views import render
+    render(sys.modules[__name__],auto)
 
 
 if __name__=='__main__':

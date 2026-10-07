@@ -79,7 +79,7 @@ def sanitize_report(raw):
 
 
 def sanitize_direction(raw):
-    if not isinstance(raw,dict):return {}
+    if not isinstance(raw,dict) or not raw:return {}
     allowed={'qqq','mag7','volatility','treasury','semiconductors','news_event'}
     out={'mode':enum(raw.get('mode'),{'ACTIVE'}) or 'UNKNOWN',
          'at':stamp(raw.get('at')),'bar_end':stamp(raw.get('bar_end')),
@@ -140,7 +140,7 @@ def sanitize_teams(raw):
               'heartbeat':stamp(t.get('heartbeat')),'health':enum(t.get('health'),HEALTH) or 'UNKNOWN',
               'day':t.get('day') if isinstance(t.get('day'),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}',t['day']) else None,
               'starting_equity':numeric(t.get('starting_equity')) or BUDGET,
-              'exit_policy':EXIT_LABELS[t['team_id']],'trades':[],'activities':[]}
+              'exit_policy':EXIT_LABELS[t['team_id']],'pending_entry':t.get('pending_entry') is True,'trades':[],'activities':[]}
         for key in ('realized_pnl','unrealized_pnl','net_pnl','equity','entry_budget','completed_trades','wins'):
             team[key]=signed(t.get(key))
         team['market_direction']=sanitize_direction(t.get('market_direction'))
@@ -161,12 +161,15 @@ def sanitize_teams(raw):
             if d.get('reason'):clean['reason']=reason(d['reason'])
             for key in ('stop_price','target_level','room_r'):clean[key]=signed(d.get(key))
             team['decisions'][owner]=clean
-        for row in records(t.get('trades'))[-30:]:
+        for row in records(t.get('trades'))[-100:]:
             symbol=contract(row.get('symbol'))
             if not symbol:continue
             trade={'symbol':symbol,'owner':enum(row.get('owner'),{'HERO','BEAR'}),
                    'entry_at':stamp(row.get('entry_at')),'closed_at':stamp(row.get('closed_at')),
-                   'quote_at':stamp(row.get('quote_at')),'exit_fills':[]}
+                   'quote_at':stamp(row.get('quote_at')),'exit_fills':[],
+                   'setup':row.get('setup') if isinstance(row.get('setup'),str) and re.fullmatch(r'[A-Za-z0-9_ /.-]{1,100}',row['setup']) else None,
+                   'exit_reason':row.get('exit_reason') if isinstance(row.get('exit_reason'),str) and re.fullmatch(r'[A-Z0-9_]{1,80}',row['exit_reason']) else None,
+                   'market_policy_version':enum(row.get('market_policy_version'),{'active-context-v1'})}
             for key in ('quantity','remaining_qty','entry_price','exit_price'):trade[key]=numeric(row.get(key))
             for key in ('option_delta','realized_pnl','unrealized_pnl','total_pnl'):trade[key]=signed(row.get(key))
             for fill in records(row.get('exit_fills')):
@@ -175,6 +178,7 @@ def sanitize_teams(raw):
             entry=row.get('market_entry') or {}
             trade['market_entry']={k:signed(entry.get(k)) for k in ('score','coverage','quantity_without_context','quantity_with_context','fraction')}
             trade['market_entry']['bias']=enum(entry.get('bias'),{'BULLISH','BEARISH','NEUTRAL'})
+            trade['market_entry']['at']=stamp(entry.get('at'))
             team['trades'].append(trade)
         for a in records(t.get('activities'))[-30:]:
             symbol=contract(a.get('symbol'))
@@ -246,3 +250,4 @@ def sanitize_supervisor(raw):
     out['recommendations']=[{k:str(r.get(k,''))[:1200] for k in ('team','trade_id','observation','recommendation')}
         for r in raw.get('recommendations',[])[:100] if isinstance(r,dict)]
     return out
+

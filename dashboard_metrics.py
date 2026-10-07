@@ -2,7 +2,7 @@
 import pandas as pd
 
 def aggregate_bars(df, minutes, now):
-    if minutes not in (5,10,15): raise ValueError('Select 5, 10 or 15 minutes')
+    if minutes not in (5,10,15,30,60): raise ValueError('Unsupported chart interval')
     if minutes==5:return df
     rows=[]
     for day,frame in df.groupby(df.index.date):
@@ -42,3 +42,4 @@ def direction_label(vic):
     if trend in ('RISING','FALLING'):votes.append(-1 if trend=='RISING' else 1);notes.append('VIX '+trend.lower())
     if vic.get('news_alerts'):notes.append('News risk: review VIC briefing')
     return ('Unavailable' if not votes else 'Mixed' if min(votes)!=max(votes) else 'Bullish' if votes[0]>0 else 'Bearish'),(' · '.join(notes) or 'No directional inputs available')+' · Advisory only'
+
