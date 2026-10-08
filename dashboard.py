@@ -104,7 +104,7 @@ def load_status(name):
             envelope=remote_report()
             if not envelope:return None,'No private telemetry received yet.','Supabase'
             snapshot=envelope['snapshot']
-            value={'paper':True,'heartbeat':snapshot.get('observed_at'),'teams':snapshot.get('teams',[])} if name=='teams' else snapshot.get('supervisor') if name=='supervisor' else snapshot.get('vic') if name=='vic' else snapshot['reports'].get(name)
+            value={'paper':True,'heartbeat':snapshot.get('observed_at'),'teams':snapshot.get('teams',[])} if name=='teams' else snapshot.get(name) if name in ('supervisor','vic','overnight') else snapshot['reports'].get(name)
             return value,None,'Supabase'
         except Exception as exc:return None,f'Private telemetry unavailable ({type(exc).__name__}).','Supabase'
     paths = [BASE / f'{name}_telemetry.json']

@@ -275,6 +275,7 @@ def render(d,auto):
         raw,error,source=d.load_status('teams')
         from telemetry_link import sanitize_teams
         teams=sanitize_teams(raw)
+        overnight,overnight_error,_=d.load_status('overnight')
         if error:st.warning(error)
         overview,teamtab,news,research=st.tabs(['Overview','Teams & activity','News & events','Research'])
         with overview:
@@ -301,6 +302,7 @@ def render(d,auto):
                     vic['_previous_technical']='Bullish' if row.Close>row.EMA9>row.EMA21 else 'Bearish' if row.Close<row.EMA9<row.EMA21 else 'Mixed'
             except Exception:pass
             market_cards(d,symbol,public_market(symbol),teams,vic,now)
+            overnight_panel(d,overnight,now)
             if df is not None:
                 d.render_chart(df,days,toggles['BBands'],False,toggles['VWAP'],symbol,orb_source=base,
                                rsi=toggles['RSI'],volume=toggles['Volume'],ema9=toggles['EMA9'],ema21=toggles['EMA21'])
@@ -315,6 +317,7 @@ def render(d,auto):
                 d.show_pipeline(reports['hero'][0],reports,now)
         with news:news_panel(d,vic,now)
         with research:
+            overnight_panel(d,overnight,now,details=True)
             st.subheader('Stock analysis & simulation research')
             st.caption('Selected asset '+symbol+' · paper-trading universe remains QQQ')
             d.financial_panel(symbol);d.fund_sections(df,symbol)
@@ -335,3 +338,44 @@ def render(d,auto):
                 else:st.info(err or 'No supervisor report connected.')
         st.caption('Victor Terminal · paper telemetry · '+now.strftime('%H:%M:%S ET'))
     body()
+
+
+def overnight_panel(d,raw,now,details=False):
+    from overnight_schema import telemetry
+    data=telemetry(raw) or {};b=data.get('brief') or data.get('monitor') or {}
+    st.subheader('VIC · QQQ daily outlook' if not details else 'Overnight evidence & morning briefing')
+    if not b:
+        st.info('Waiting for the overnight researcher. Morning briefings publish at 09:15 and 09:25 ET.')
+        return
+    active=False
+    try:active=(b.get('status')=='READY' and b.get('slot') in ('0915','0925') and b.get('session_date')==str(now.date()) and pd.Timestamp(b['issued_at'])<=now<pd.Timestamp(b['valid_until']))
+    except (TypeError,ValueError):pass
+    st.caption('Session '+str(b.get('session_date'))+' · '+str(b.get('slot'))+' · '+('Active morning context' if active else 'Preview / expired / unavailable for entry')+' · issued '+d.display_time(b.get('issued_at')))
+    st.caption('Research worker: '+str(data.get('worker_status'))+' · heartbeat '+d.display_time(data.get('heartbeat')))
+    f=b.get('forecast') or {};cols=st.columns(4)
+    with cols[0]:
+        direction=b.get('direction') or 'UNKNOWN'
+        d.card('Expected day color',direction,'Compared with previous close',GREEN if direction=='BULLISH' else RED if direction=='BEARISH' else YELLOW)
+        st.caption('Probability: uncalibrated / unavailable')
+    for col,key,label in ((cols[1],'low','Estimated daily low'),(cols[2],'high','Estimated daily high'),(cols[3],'hold','Estimate at hold exit')):
+        with col:
+            estimate=f.get(key) or {}
+            d.card(label,d.money(estimate.get('estimate')),'Historical scenario estimate',YELLOW)
+            st.caption('Band '+d.money(estimate.get('lower'))+' – '+d.money(estimate.get('upper')))
+    st.caption('Hold exit is normally 15:45 ET; earlier on shortened sessions. These are QQQ prices, not option prices. Bands have unvalidated coverage. Team 7 also needs agreement with the move from its entry and a confirmed chart pullback.')
+    if not details:return
+    ai=b.get('ai') or {};st.write('AI synthesis: '+str(ai.get('status','NOT_AVAILABLE')))
+    for key,label in [('summary','Summary'),('bull_case','Bull case'),('bear_case','Bear case'),('invalidation','What would change the view')]:
+        if ai.get(key):st.write(label+': '+ai[key])
+    if ai.get('evidence_ids'):st.caption('Evidence: '+', '.join(ai['evidence_ids']))
+    if ai.get('usage',{}).get('total_tokens') is not None:st.caption('AI tokens: '+str(int(ai['usage']['total_tokens'])))
+    st.dataframe([{'Input':r['id'],'Group':r['group'],'Quality':r['status'],'Used':r['eligible'],
+        'Value':r.get('value'),'Change %':r.get('change_pct'),'Yield change bp':r.get('change_bps'),
+        'Observation':r.get('observed_at') or r.get('observation_date'),'Source':r['source']} for r in b.get('observations',[])],hide_index=True,width='stretch')
+    for r in b.get('news',[]):
+        st.write(r.get('title'));st.caption(str(r.get('published_at'))+' · '+str(r.get('source')))
+        if r.get('url'):st.link_button('Source · '+r.get('id','article'),r['url'])
+    if b.get('events'):st.dataframe(b['events'],hide_index=True,width='stretch')
+    if b.get('economic_releases'):st.dataframe(b['economic_releases'],hide_index=True,width='stretch')
+    for warning in b.get('warnings',[]):st.caption(warning)
+    st.caption('Frozen forecast ID: '+str(b.get('forecast_id'))+' · both morning briefings are included in the daily PDF.')

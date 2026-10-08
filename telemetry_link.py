@@ -95,6 +95,8 @@ def sanitize_direction(raw):
     breadth=raw.get('mag7') or {}
     out['mag7']={k:numeric(breadth.get(k)) for k in ('available','green','red','flat')}
     out['mag7']['confirmed']=breadth.get('confirmed') is True
+    from overnight_schema import compact
+    out['overnight']=compact(raw.get('overnight'))
     return out
 
 
@@ -131,10 +133,11 @@ def sanitize_snapshot(raw):
         raise ValueError('Invalid paper report format')
     reports=raw.get('reports')
     if not isinstance(reports,dict): raise ValueError('Missing reports')
+    from overnight_schema import telemetry
     return {'schema':1,'paper':True,'observed_at':stamp(raw.get('observed_at')),
             'reports':{name:sanitize_report(reports.get(name)) for name in ('hero','bear')},
             'vic':sanitize_vic(raw.get('vic')), 'teams':sanitize_teams(raw.get('teams')),
-            'supervisor':sanitize_supervisor(raw.get('supervisor'))}
+            'supervisor':sanitize_supervisor(raw.get('supervisor')),'overnight':telemetry(raw.get('overnight'))}
 
 
 def signed(value):
@@ -200,6 +203,8 @@ def sanitize_teams(raw):
             trade['market_entry']['at']=stamp(entry.get('at'))
             trade['market_entry']['reason']=enum(entry.get('reason'),{'VIC_ALIGNED','VIC_CONFLICT_REDUCED','VIC_NEUTRAL_REDUCED','VIC_INCOMPLETE_CHART_ONLY_REDUCED','TEAM7_FIXED_SINGLE_ALLOCATION','LEGACY_CONTEXT_POLICY'})
             trade['market_entry']['entry_policy_version']=enum(entry.get('entry_policy_version'),{'vic-policy-v2','active-context-v1'})
+            from overnight_schema import compact
+            trade['market_entry']['overnight']=compact(entry.get('overnight'))
             team['trades'].append(trade)
         for a in records(t.get('activities'))[-30:]:
             symbol=contract(a.get('symbol'))

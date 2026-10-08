@@ -6,3 +6,4 @@ python-dotenv>=1,<2
 certifi>=2024.8.30
 
 reportlab>=4.2,<5
+exchange-calendars>=4.5,<5

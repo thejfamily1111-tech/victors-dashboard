@@ -64,7 +64,7 @@ for _number, (_label,_minutes,_trades,_net) in REPORT_WINNERS.items():
 
 # Appended to preserve persisted report-team identities and the original roster order.
 NAMES['team7']='VIC daily direction / one morning entry'
-ENTRY_LABELS['team7']='09:30 <= entry < 10:00 ET; one submission per session; all six available daily VIC factors agree; confirmed local pullback from completed one-minute candles. Up to $5,000 premium, standard QQQ 1–3 DTE / 0.40–0.60 absolute delta. No future low, forced deadline entry, top-up or re-entry.'
+ENTRY_LABELS['team7']='09:30 <= entry < 10:00 ET; one submission per session; valid 09:15/09:25 overnight forecast agrees with all six daily VIC factors and the expected move from entry to the hold-exit price; confirmed local one-minute pullback. Up to $5,000 premium, standard QQQ 1–3 DTE / 0.40–0.60 absolute delta. No future low, forced deadline entry, top-up or re-entry.'
 EXIT_LABELS['team7']='Hold all filled contracts until 15:45 ET (15 minutes before an early close). No routine premium stop, profit target, trailing floor or VIC reversal exit. Manual flatten remains available. Entire paid premium is at risk; paper experiment.'
 ENTRY_LABELS['team1']+=' VIC v2 pilot requires EMA momentum AND directional RSI; volume or VIC alone cannot supply confirmation.'
 ENTRY_LABELS['team3']+=' VIC v2 ranks valid sides and changes premium allocation; its chart-only setup remains independent.'
