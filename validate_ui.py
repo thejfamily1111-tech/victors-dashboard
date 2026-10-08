@@ -33,11 +33,14 @@ v.render(d,False)
 a=AppTest.from_string(script).run(timeout=30)
 assert not a.exception,[(e.message,e.stack_trace) for e in a.exception]
 assert {'Overview','Teams & activity','News & events','Research'}.issubset({t.label for t in a.tabs})
-assert len(a.button)==17
+assert len(a.button)==18
 assert {x.label:x.value for x in a.toggle}=={'BBands':True,'RSI':True,'Volume':True,'EMA9':False,'EMA21':False,'VWAP':False}
 a.button[2].click().run(timeout=30)
 assert not a.exception,[(e.message,e.stack_trace) for e in a.exception]
 assert a.session_state['team_detail']=='team3'
+a.button[-1].click().run(timeout=30)
+assert not a.exception,[(e.message,e.stack_trace) for e in a.exception]
+assert a.session_state['team_detail']=='team7'
 a.selectbox[0].select(60).run(timeout=30)
 assert not a.exception,[e.message for e in a.exception]
 print('PASS: PIN boundary; four tabs; missing feeds; team selection; 60m chart; indicator defaults')

@@ -87,6 +87,8 @@ def earnings():
 def market_cards(d,symbol,market,teams,vic,now):
     q=market.get(symbol,{})
     direction=next(iter(sorted([t.get('market_direction',{}) for t in teams if t.get('market_direction',{}).get('mode')=='ACTIVE'],key=lambda x:x.get('at') or '',reverse=True)),{})
+    policy=next(iter(sorted([t.get('vic_policy',{}) for t in teams if t.get('vic_policy')],key=lambda x:x.get('at') or '',reverse=True)),{})
+    if policy:direction=policy
     cols=st.columns(4)
     with cols[0]:
         note=f"{d.money(q.get('change'))} / {pct(q.get('change_pct'))} vs previous close {d.money(q.get('prior'))}"
@@ -99,6 +101,10 @@ def market_cards(d,symbol,market,teams,vic,now):
         d.card('VIC shared direction',bias,'Score '+(f'{score:+.2f}' if score is not None else 'N/A')+' · heuristic, not probability',GREEN if bias=='BULLISH' else RED if bias=='BEARISH' else GRAY if bias=='Unavailable' else YELLOW)
         st.caption('Coverage '+(f'{coverage:.0%}' if coverage is not None else 'N/A')+' · '+('Fresh' if fresh(direction.get('at'),now) else 'Stale / unavailable'))
         st.caption('Updated '+d.display_time(direction.get('at')))
+        if policy:
+            st.caption('15-minute view: '+str(policy.get('regime','UNKNOWN'))+' · '+str(policy.get('confidence','LOW')))
+            st.caption('Team 7 daily view: '+str(policy.get('daily_outlook',{}).get('bias','UNKNOWN'))+' · unvalidated forecast')
+            if policy.get('missing'):st.caption('Missing or stale: '+', '.join(policy['missing']))
         st.caption('Previous-session QQQ technical bias: '+vic.get('_previous_technical','Unavailable')+' · completed close vs EMA9/21')
     with cols[2]:
         yields=treasury();ten=yields.get('DGS10',{});two=yields.get('DGS2',{})
@@ -201,6 +207,16 @@ def teams_panel(d,teams,source,now,summary_only=False):
     st.write(ENTRY_LABELS[selected])
     if not t:st.info('This team has not supplied a report.');return
     st.caption('Current configured exit policy: '+t.get('exit_policy','Unavailable')+' Position-specific historical policy may differ.')
+    policy=t.get('vic_policy') or {}
+    if policy:
+        st.caption('VIC: '+str(policy.get('bias','UNKNOWN'))+' · '+str(policy.get('confidence','LOW'))+' · '+d.display_time(policy.get('at')))
+    if selected=='team7':
+        st.info('One morning entry, then hold until 15:45 ET. No routine stop-loss or profit-taking. Paper experiment.')
+        st.caption('Daily shot '+('used' if t.get('entry_used') else 'not yet used')+' · Daily outlook '+str(policy.get('daily_outlook',{}).get('bias','UNKNOWN')))
+    for position in t.get('trades',[]):
+        entry=position.get('market_entry') or {}
+        if entry.get('reason'):
+            st.caption(str(position.get('symbol',''))+' · '+entry['reason'].replace('_',' ')+' · allocation multiplier '+str(entry.get('fraction')))
     st.caption('Entry allowance '+d.money(t.get('entry_budget'))+' · latest report '+d.display_time(t.get('heartbeat')))
     trades=sorted(t.get('trades',[]),key=lambda p:p.get('closed_at') or p.get('entry_at') or '')
     rows=[]

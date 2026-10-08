@@ -151,7 +151,7 @@ def cached(key,seconds,fn):
 
 def topic(title):
     t=title.lower()
-    for key,pattern in [('conference',r'fomc press conference'),('fomc',r'fomc meeting|fomc statement'),
+    for key,pattern in [('conference',r'fomc press conference'),('fomc',r'fomc meeting|fomc statement|fomc minutes'),
                         ('cpi',r'consumer price index'),('ppi',r'producer price index'),
                         ('jobs',r'employment situation'),('jolts',r'job openings'),
                         ('eci',r'employment cost index'),('pce',r'personal income and outlays'),

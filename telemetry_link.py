@@ -80,7 +80,7 @@ def sanitize_report(raw):
 
 def sanitize_direction(raw):
     if not isinstance(raw,dict) or not raw:return {}
-    allowed={'qqq','mag7','volatility','treasury','semiconductors','news_event'}
+    allowed={'qqq','mag7','volatility','treasury','semiconductors','news_event','breadth'}
     out={'mode':enum(raw.get('mode'),{'ACTIVE'}) or 'UNKNOWN',
          'at':stamp(raw.get('at')),'bar_end':stamp(raw.get('bar_end')),
          'bias':enum(raw.get('bias'),{'BULLISH','BEARISH','NEUTRAL'}) or 'UNKNOWN',
@@ -89,11 +89,27 @@ def sanitize_direction(raw):
     for k,f in (raw.get('factors') or {}).items():
         if k not in allowed or not isinstance(f,dict):continue
         out['factors'][k]={'value':signed(f.get('value')),'at':stamp(f.get('at')),
-                           'source_code':enum(f.get('source_code'),{'QQQ','MAG7','VXN','VIX','TNX','IEF_PROXY','SMH','NEWS_EVENT'}),
-                           'change_pct_15m':signed(f.get('change_pct_15m'))}
+                           'source_code':enum(f.get('source_code'),{'QQQ','MAG7','MAG7_WEIGHTED','QQQE','^VXN','^VIX','^TNX','VXN','VIX','TNX','IEF_PROXY','SMH','NEWS_EVENT'}),
+                           'change_pct_15m':signed(f.get('change_pct_15m')),
+                           'change_pct':signed(f.get('change_pct'))}
     breadth=raw.get('mag7') or {}
     out['mag7']={k:numeric(breadth.get(k)) for k in ('available','green','red','flat')}
     out['mag7']['confirmed']=breadth.get('confirmed') is True
+    return out
+
+
+def sanitize_policy(raw):
+    if not isinstance(raw,dict) or raw.get('version')!='vic-policy-v2':return {}
+    out=sanitize_direction(raw)
+    out.update(version='vic-policy-v2',valid_until=stamp(raw.get('valid_until')),
+        confidence=enum(raw.get('confidence'),{'LOW','MODERATE','HIGH_CONSENSUS'}),
+        regime=enum(raw.get('regime'),{'BULLISH_TREND','BEARISH_TREND','MIXED_OR_RANGE','UNKNOWN'}),
+        holdings_status=enum(raw.get('holdings_status'),{'AVAILABLE','UNAVAILABLE'}),
+        snapshot_id=raw.get('snapshot_id') if isinstance(raw.get('snapshot_id'),str) and re.fullmatch(r'[a-f0-9]{20}',raw['snapshot_id']) else None)
+    day=raw.get('daily_outlook') or {}
+    out['daily_outlook']={'bias':enum(day.get('bias'),{'BULLISH','BEARISH','MIXED','UNKNOWN'}),
+        'all_aligned':day.get('all_aligned') is True,'news_opposes':day.get('news_opposes') is True,
+        'missing':[k for k in day.get('missing',[]) if k in {'qqq','mag7','breadth','semiconductors','volatility','treasury'}]}
     return out
 
 
@@ -105,6 +121,7 @@ def sanitize_vic(raw):
             'health':enum(raw.get('health'),HEALTH) or 'UNKNOWN',
             'current_bias':enum(raw.get('current_bias'),{'BULLISH','BEARISH','NEUTRAL','UNKNOWN'}) or 'UNKNOWN',
             'market_direction':sanitize_direction(raw.get('market_direction')),
+            'vic_policy':sanitize_policy(raw.get('vic_policy')),
             'permission':{'light':enum(permission.get('light'),{'GREEN','RED','YELLOW'}) or 'UNKNOWN',
                           'valid_until':stamp(permission.get('valid_until'))}}
 
@@ -144,6 +161,8 @@ def sanitize_teams(raw):
         for key in ('realized_pnl','unrealized_pnl','net_pnl','equity','entry_budget','completed_trades','wins'):
             team[key]=signed(t.get(key))
         team['market_direction']=sanitize_direction(t.get('market_direction'))
+        team['vic_policy']=sanitize_policy(t.get('vic_policy'))
+        team['entry_used']=t.get('entry_used') is True
         team['report_team']=numeric(t.get('report_team'))
         metrics=t.get('metrics') if isinstance(t.get('metrics'),dict) else {}
         team['metrics']={'bar_end':stamp(metrics.get('bar_end'))}
@@ -169,7 +188,7 @@ def sanitize_teams(raw):
                    'quote_at':stamp(row.get('quote_at')),'exit_fills':[],
                    'setup':row.get('setup') if isinstance(row.get('setup'),str) and re.fullmatch(r'[A-Za-z0-9_ /.-]{1,100}',row['setup']) else None,
                    'exit_reason':row.get('exit_reason') if isinstance(row.get('exit_reason'),str) and re.fullmatch(r'[A-Z0-9_]{1,80}',row['exit_reason']) else None,
-                   'market_policy_version':enum(row.get('market_policy_version'),{'active-context-v1'})}
+                   'market_policy_version':enum(row.get('market_policy_version'),{'active-context-v1','vic-day-hold-v1'})}
             for key in ('quantity','remaining_qty','entry_price','exit_price'):trade[key]=numeric(row.get(key))
             for key in ('option_delta','realized_pnl','unrealized_pnl','total_pnl'):trade[key]=signed(row.get(key))
             for fill in records(row.get('exit_fills')):
@@ -179,6 +198,8 @@ def sanitize_teams(raw):
             trade['market_entry']={k:signed(entry.get(k)) for k in ('score','coverage','quantity_without_context','quantity_with_context','fraction')}
             trade['market_entry']['bias']=enum(entry.get('bias'),{'BULLISH','BEARISH','NEUTRAL'})
             trade['market_entry']['at']=stamp(entry.get('at'))
+            trade['market_entry']['reason']=enum(entry.get('reason'),{'VIC_ALIGNED','VIC_CONFLICT_REDUCED','VIC_NEUTRAL_REDUCED','VIC_INCOMPLETE_CHART_ONLY_REDUCED','TEAM7_FIXED_SINGLE_ALLOCATION','LEGACY_CONTEXT_POLICY'})
+            trade['market_entry']['entry_policy_version']=enum(entry.get('entry_policy_version'),{'vic-policy-v2','active-context-v1'})
             team['trades'].append(trade)
         for a in records(t.get('activities'))[-30:]:
             symbol=contract(a.get('symbol'))

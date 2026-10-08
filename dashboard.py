@@ -328,8 +328,8 @@ def show_teams(now):
     if error:st.warning(error)
     if not teams:return False
     st.subheader('QQQ paper teams · current strategies + report winners')
-    st.caption('Updated roster: 17 teams · $5,000 virtual allowance each · $30,000 combined open-premium cap after the new engine starts. Paper P&L shown here excludes fees.')
-    if len(teams)<17:st.info(f'{len(teams)} teams reported by the current runtime. Start the updated Mac engine and uploader to connect the full roster.')
+    st.caption('Updated roster: 18 teams · $5,000 virtual allowance each · $30,000 combined open-premium cap after the new engine starts. Paper P&L shown here excludes fees.')
+    if len(teams)<18:st.info(f'{len(teams)} teams reported by the current runtime. Start the updated Mac engine and uploader to connect the full roster.')
     show_market_direction(teams,now)
     lookup={t['team_id']:t for t in teams}
     from team_settings import NAMES
@@ -449,7 +449,7 @@ def mag7_context(asof):
 def rule_panel(df, vic_report=None):
     from team_settings import NAMES, EXIT_LABELS, ENTRY_LABELS
     from session_rules import ENTRY_WINDOW_LABEL
-    st.subheader('17-team strategy definitions')
+    st.subheader('18-team strategy definitions')
     st.caption(ENTRY_WINDOW_LABEL+' · Active market context influences direction, priority, size and new-position thesis exits')
     for team,name in NAMES.items():
         st.write(team.upper()+': '+name)
