@@ -30,8 +30,8 @@ def quote_one(symbol):
         at=pd.Timestamp(stamp,unit='s',tz='UTC').isoformat() if num(stamp) else None
         value=num(info.get('regularMarketPrice'));prior=num(info.get('regularMarketPreviousClose'))
         delta,relative=change(value,prior)
-        bid,ask=num(info.get('bid')),num(info.get('ask'))
-        if bid is None or ask is None or not 0<bid<=ask:bid=ask=None
+        # Provider supplies no timestamp for these fields.
+        bid=ask=None
         prior_change=None
         if symbol in MAG7:
             try:
@@ -51,17 +51,8 @@ def public_market(symbol):
 
 @st.cache_data(ttl=300,show_spinner=False)
 def treasury():
-    # Actual yields, daily observations. Never display TNX or IEF as a Treasury yield.
-    try:
-        now=pd.Timestamp.now(tz='America/New_York')
-        start=str((now-timedelta(days=30)).date())
-        url='https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10,DGS2&cosd='+start
-        import ssl,certifi
-        ctx=ssl.create_default_context(cafile=certifi.where())
-        with urlopen(Request(url,headers={'User-Agent':'VictorTerminal/2'}),timeout=10,context=ctx) as response:
-            frame=pd.read_csv(io.BytesIO(response.read(200000)),index_col=0,parse_dates=True)
-        return {k:daily_observation(frame[[k]],now) for k in ('DGS10','DGS2')}
-    except Exception as exc:return {'error':type(exc).__name__}
+    from dashboard_status import fetch_treasury
+    return fetch_treasury(pd.Timestamp.now(tz='America/New_York'))
 
 @st.cache_data(ttl=900,show_spinner=False)
 def earnings():
@@ -93,9 +84,8 @@ def market_cards(d,symbol,market,teams,vic,now):
     with cols[0]:
         note=f"{d.money(q.get('change'))} / {pct(q.get('change_pct'))} vs previous close {d.money(q.get('prior'))}"
         d.card(symbol+' price',d.money(q.get('value')),note,color(q.get('change')))
-        st.caption('Bid '+d.money(q.get('bid'))+' · Ask '+d.money(q.get('ask'))+' · Spread '+d.money(q.get('spread')))
         st.caption('Price time '+d.display_time(q.get('at'))+' · Yahoo indicative / delayed')
-        st.caption('Bid/ask timestamps unavailable; not execution quotes.')
+        st.caption('Bid/ask hidden: provider timestamps unavailable; not execution quotes.')
     with cols[1]:
         bias=direction.get('bias','Unavailable');score=num(direction.get('score'));coverage=num(direction.get('coverage'))
         d.card('VIC shared direction',bias,'Score '+(f'{score:+.2f}' if score is not None else 'N/A')+' · heuristic, not probability',GREEN if bias=='BULLISH' else RED if bias=='BEARISH' else GRAY if bias=='Unavailable' else YELLOW)
@@ -113,7 +103,9 @@ def market_cards(d,symbol,market,teams,vic,now):
                (f'{delta*100:+.1f} bp · {pct(ten.get("change_pct"))}' if delta is not None else 'Daily change unavailable'),color(delta))
         st.caption('Previous '+(f'{ten["prior"]:.2f}%' if ten.get('prior') is not None else 'N/A')+' · 2-year '+(f'{two["value"]:.2f}%' if two.get('value') is not None else 'N/A'))
         if two.get('change') is not None:st.caption(f'2-year {two["change"]*100:+.1f} bp · {pct(two.get("change_pct"))}')
-        st.caption('FRED daily observation '+str(ten.get('date','unavailable'))+' · not intraday')
+        st.caption('FRED daily observations · 10-year '+str(ten.get('date','unavailable'))+' · 2-year '+str(two.get('date','unavailable'))+' · not intraday')
+        for label,row in [('10-year',ten),('2-year',two)]:
+            if row.get('error'):st.caption(label+' yield unavailable: '+row['error'])
     with cols[3]:
         v=market.get('^VIX',{});vxn=market.get('^VXN',{})
         d.card('VIX',f'{v["value"]:.2f}' if v.get('value') is not None else 'N/A',pct(v.get('change_pct'))+' vs previous close',color(v.get('change')))
@@ -342,16 +334,17 @@ def render(d,auto):
 
 def overnight_panel(d,raw,now,details=False):
     from overnight_schema import telemetry
-    data=telemetry(raw) or {};b=data.get('brief') or data.get('monitor') or {}
+    from dashboard_status import select_research, research_status, ai_schedule_lines
+    data=telemetry(raw) or {};b=select_research(data)
     st.subheader('VIC · QQQ daily outlook' if not details else 'Overnight evidence & morning briefing')
     if not b:
         st.info('Waiting for the overnight researcher. Morning briefings publish at 09:15 and 09:25 ET.')
         return
-    active=False
-    try:active=(b.get('status')=='READY' and b.get('slot') in ('0915','0925') and b.get('session_date')==str(now.date()) and pd.Timestamp(b['issued_at'])<=now<pd.Timestamp(b['valid_until']))
-    except (TypeError,ValueError):pass
-    st.caption('Session '+str(b.get('session_date'))+' · '+str(b.get('slot'))+' · '+('Active morning context' if active else 'Preview / expired / unavailable for entry')+' · issued '+d.display_time(b.get('issued_at')))
+    st.caption('Session '+str(b.get('session_date'))+' · '+str(b.get('slot'))+' · '+research_status(b,now)+' · issued '+d.display_time(b.get('issued_at')))
     st.caption('Research worker: '+str(data.get('worker_status'))+' · heartbeat '+d.display_time(data.get('heartbeat')))
+    for line in ai_schedule_lines(data,b,now):st.caption(line)
+    if (b.get('ai') or {}).get('status')=='REQUEST_FAILED':
+        st.warning('AI synthesis failed. The deterministic forecast is still shown; check the research service diagnostic before relying on AI analysis.')
     f=b.get('forecast') or {};cols=st.columns(4)
     with cols[0]:
         direction=b.get('direction') or 'UNKNOWN'
@@ -379,3 +372,4 @@ def overnight_panel(d,raw,now,details=False):
     if b.get('economic_releases'):st.dataframe(b['economic_releases'],hide_index=True,width='stretch')
     for warning in b.get('warnings',[]):st.caption(warning)
     st.caption('Frozen forecast ID: '+str(b.get('forecast_id'))+' · both morning briefings are included in the daily PDF.')
+
