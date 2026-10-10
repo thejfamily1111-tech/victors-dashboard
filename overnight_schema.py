@@ -62,6 +62,8 @@ def telemetry(raw):
     from telemetry_link import stamp
     if not isinstance(raw,dict):return None
     return {'version':'overnight-v1.4.0','heartbeat':stamp(raw.get('heartbeat')),
+        'ai_last_success_at':stamp(raw.get('ai_last_success_at')),
         'session_date':clean_text(raw.get('session_date'),10),'worker_status':clean_text(raw.get('worker_status'),50),
         'brief':brief(raw.get('brief')),'monitor':brief(raw.get('monitor')),
         'scheduled_briefs':[brief(r) for r in raw.get('scheduled_briefs',[])[:2] if isinstance(r,dict)]}
+
