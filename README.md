@@ -1,4 +1,13 @@
+Current operating instructions: [Unified dashboard controls](UNIFIED_CONTROLS.md). Use the one-time unified installer; the historical launch instructions below are retained for reference.
+
 # Victor Terminal — online dashboard
+
+## Beta Research integration
+
+The **Beta Research** main tab contains Overview, Research & watchlist,
+Positions & orders, Activity, and Validation. The research engine and ledger
+remain separate. See [setup and data connection](BETA_INTEGRATION.md) before
+enabling the online report. No trading is started by this dashboard.
 
 This repository holds the website dashboard. Streamlit uses branch `main` and `dashboard.py` at the repository root. Runtime code remains in those locations.
 
@@ -20,3 +29,4 @@ The research repository is private and requires authorized access. It is the cen
 Overview now displays the Mac research worker's frozen QQQ morning forecast, estimated daily low/high and hold-exit estimate. Research displays source quality and optional AI scenarios. Probability remains explicitly uncalibrated. This website reads telemetry; it does not collect overnight evidence or submit orders.
 
 Install and start the matching [v1.4.0 Mac package](https://github.com/thejfamily1111-tech/victor-terminal-research/blob/main/code/current/paper_active_market_17/OVERNIGHT_README.md), and keep its telemetry uploader running. GitHub updates do not install or start the Mac worker.
+

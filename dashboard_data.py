@@ -3,6 +3,56 @@ import math
 from datetime import timedelta
 import pandas as pd
 
+
+def has_outstanding_exposure(team):
+    """Legacy owners remain visible until both filled positions and orders resolve."""
+    return (bool(team.get('pending_entry')) or (num(team.get('pending_orders')) or 0)>0
+            or (num(team.get('unresolved_orders')) or 0)>0
+            or any((num(p.get('remaining_qty')) or 0)>0 for p in team.get('trades',[])))
+
+
+def visible_team_ids(teams,active_ids=None):
+    import team_settings
+    active=tuple(active_ids if active_ids is not None else getattr(team_settings,'ACTIVE_TEAM_IDS',team_settings.NAMES))
+    records={t.get('team_id'):t for t in teams if isinstance(t,dict)}
+    legacy=[team for team in team_settings.NAMES if team not in active and has_outstanding_exposure(records.get(team,{}))]
+    return list(dict.fromkeys([*active,*legacy]))
+
+
+def position_provenance_lines(position):
+    """Describe entry-stored facts only. Never backfill old trades with current rules."""
+    raw=position.get('strategy_provenance')
+    provenance=raw if isinstance(raw,dict) else {}
+    setup=position.get('setup_type') or position.get('setup') or 'unavailable'
+    if not provenance:
+        return ['Strategy provenance unavailable; recorded setup: '+str(setup)+'. Current rules cannot be inferred for this position.']
+    lines=['Recorded strategy: '+str(provenance.get('label') or provenance.get('team_id') or 'unavailable')
+           +' | version '+str(provenance.get('strategy_version') or 'unavailable')
+           +' | roster '+str(provenance.get('roster_version') or 'unavailable')]
+    for key,label in (('entry_label','Recorded entry rules'),('exit_label','Recorded exit rules'),
+                      ('source_rule','Source rule'),('config_hash','Configuration hash'),('captured_at','Captured at')):
+        if provenance.get(key) is not None:lines.append(label+': '+str(provenance[key]))
+    return lines
+
+
+def overnight_health_lines(brief):
+    """Deterministic readiness and optional AI success are different health signals."""
+    ai=brief.get('ai') or {}
+    status=str(ai.get('status') or 'NOT_AVAILABLE')
+    lines=['Forecast engine: '+str(brief.get('status') or 'UNAVAILABLE')+' | AI synthesis: '+status]
+    diagnostic=ai.get('diagnostic') or {}
+    if isinstance(diagnostic,dict):
+        category=diagnostic.get('category') or diagnostic.get('code')
+        http=diagnostic.get('http_status') or diagnostic.get('status_code')
+        if category or http:lines.append('AI service diagnostic: '+str(category or 'REQUEST_FAILED')+(f' | HTTP {http}' if http else ''))
+    if status not in {'READY','OK','SUCCESS','COMPLETE','COMPLETED'}:
+        lines.append('AI synthesis is unavailable. Any displayed forecast comes from the deterministic engine.')
+    observations=brief.get('observations') or []
+    degraded=[str(o.get('id') or 'unknown') for o in observations if isinstance(o,dict) and
+              (o.get('eligible') is False or o.get('status') in {'STALE','MISSING','ERROR','UNAVAILABLE'})]
+    if degraded:lines.append('Inputs excluded or degraded: '+', '.join(degraded)+'.')
+    return lines
+
 def num(v):
     if isinstance(v,bool):return None
     try:

@@ -9,6 +9,7 @@ script='''
 import sys,types
 import dashboard as d
 import dashboard_views as v
+import operations_panel
 from test_dashboard_refresh import fixture,T
 import pandas as pd
 class Clock:
@@ -21,6 +22,7 @@ d.financial_panel=lambda s:None
 d.fund_sections=lambda *a:None
 d.rule_panel=lambda *a:None
 d.vic_module=lambda:types.SimpleNamespace(fetch_news=lambda:{'items':[]})
+operations_panel.load_context=lambda d:{'client':None,'envelope':{},'error':'Offline UI fixture'}
 sys.modules['simulation_lab']=types.SimpleNamespace(render=lambda:None)
 index=pd.date_range('2026-10-05 09:30',periods=78,freq='5min',tz=T.tzinfo).append(pd.date_range('2026-10-06 09:30',periods=30,freq='5min',tz=T.tzinfo))
 raw=pd.DataFrame({'Open':600.,'High':601.,'Low':599.,'Close':600.5,'Volume':10000.},index=index)
@@ -32,18 +34,19 @@ v.render(d,False)
 '''
 a=AppTest.from_string(script).run(timeout=30)
 assert not a.exception,[(e.message,e.stack_trace) for e in a.exception]
-assert {'Overview','Teams & activity','News & events','Research'}.issubset({t.label for t in a.tabs})
-assert len(a.button)==18
+assert {'QQQ Terminal','Beta Research','Overview','Teams & activity','News & events','QQQ research'}.issubset({t.label for t in a.tabs})
+assert len([button for button in a.button if str(button.key).startswith('view_')])==10
+assert len([button for button in a.button if str(button.key).startswith('control_')])==10
 assert {x.label:x.value for x in a.toggle}=={'BBands':True,'RSI':True,'Volume':True,'EMA9':False,'EMA21':False,'VWAP':False}
-a.button[2].click().run(timeout=30)
+a.button(key='view_team3').click().run(timeout=30)
 assert not a.exception,[(e.message,e.stack_trace) for e in a.exception]
 assert a.session_state['team_detail']=='team3'
-a.button[-1].click().run(timeout=30)
+a.button(key='view_team7').click().run(timeout=30)
 assert not a.exception,[(e.message,e.stack_trace) for e in a.exception]
 assert a.session_state['team_detail']=='team7'
 a.selectbox[0].select(60).run(timeout=30)
 assert not a.exception,[e.message for e in a.exception]
-print('PASS: PIN boundary; four tabs; missing feeds; team selection; 60m chart; indicator defaults')
+print('PASS: PIN boundary; QQQ/Beta separation; ten-team roster; five ON/OFF controls; missing feeds; team selection; 60m chart; indicator defaults')
 import dashboard as d
 from test_dashboard_refresh import T
 exec(script.split('v.render')[0],globals())

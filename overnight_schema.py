@@ -43,7 +43,9 @@ def brief(raw):
         url=urlsplit(str(r.get('url','')))
         safe_url=url._replace(query='',fragment='').geturl() if url.scheme=='https' and url.hostname and not url.username else ''
         out['news'].append({**{k:clean_text(r.get(k),260) for k in ('id','title','source')},'url':safe_url[:400],
-            'published_at':stamp(r.get('published_at')),'received_at':stamp(r.get('received_at'))})
+            'published_at':stamp(r.get('published_at')),'received_at':stamp(r.get('received_at')),
+            'first_observed_at':stamp(r.get('first_observed_at')),
+            'receipt_basis':clean_text(r.get('receipt_basis'),60)})
     for r in records(raw.get('events'))[:20]:
         out['events'].append({'title':clean_text(r.get('title'),200),'scheduled_at':stamp(r.get('scheduled_at')),
             'date':clean_text(r.get('date'),10),'impact':enum(r.get('impact'),{'HIGH'}),'source':clean_text(r.get('source'),100)})
@@ -53,17 +55,29 @@ def brief(raw):
     out['warnings']=[clean_text(s,220) for s in raw.get('warnings',[])[:20] if isinstance(s,str)]
     ai=raw.get('ai') or {}
     out['ai']={k:clean_text(ai.get(k),1200 if k!='status' else 50) for k in ('status','summary','bull_case','bear_case','invalidation','stance')}
+    from overnight_ai import sanitize_diagnostic
+    if ai.get('diagnostic'):out['ai']['diagnostic']=sanitize_diagnostic(ai['diagnostic'])
     out['ai']['evidence_ids']=[clean_text(s,80) for s in ai.get('evidence_ids',[])[:30] if isinstance(s,str)]
     out['ai']['usage']={k:numeric((ai.get('usage') or {}).get(k)) for k in ('input_tokens','output_tokens','total_tokens')}
     return out
 
 
 def telemetry(raw):
-    from telemetry_link import stamp
+    from telemetry_link import stamp, sanitize_control_receipt
+    from local_research_plan import compact as review_compact
     if not isinstance(raw,dict):return None
+    from overnight_credentials import compact_configuration
+    worker=raw.get('worker') if isinstance(raw.get('worker'),dict) else {}
+    identity=worker.get('instance_id')
     return {'version':'overnight-v1.4.0','heartbeat':stamp(raw.get('heartbeat')),
+        'control_receipt':sanitize_control_receipt(raw.get('control_receipt')),
+        'worker':{'instance_id':identity if isinstance(identity,str) and re.fullmatch(r'[a-f0-9]{32}',identity) else None,
+            'started_at':stamp(worker.get('started_at')),
+            'release':'Victor_Paper_v1.7.1' if worker.get('release')=='Victor_Paper_v1.7.1' else None},
+        'ai_configuration':compact_configuration(raw.get('ai_configuration')),
         'ai_last_success_at':stamp(raw.get('ai_last_success_at')),
         'session_date':clean_text(raw.get('session_date'),10),'worker_status':clean_text(raw.get('worker_status'),50),
         'brief':brief(raw.get('brief')),'monitor':brief(raw.get('monitor')),
-        'scheduled_briefs':[brief(r) for r in raw.get('scheduled_briefs',[])[:2] if isinstance(r,dict)]}
-
+        'scheduled_briefs':[brief(r) for r in raw.get('scheduled_briefs',[])[:2] if isinstance(r,dict)],
+        'local_review':review_compact(raw.get('local_review')),
+        'scheduled_reviews':[review_compact(r) for r in raw.get('scheduled_reviews',[])[:4] if isinstance(r,dict)]}

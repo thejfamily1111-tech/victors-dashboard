@@ -2,8 +2,9 @@
 Run: python3 -m streamlit run dashboard.py --server.address 127.0.0.1
 Keep next to vic.py, hero.py, bear.py, avatar_logo.png and your existing .env.
 DASHBOARD_PIN is mandatory; define it in .env or server Streamlit secrets.
-This dashboard never submits orders. It computes an informational VIC report;
-run vic.py separately to publish expiring vic_telemetry.json permissions.
+This dashboard never submits orders directly. Its authenticated ON/OFF controls
+request fixed paper-service settings from the Mac and display worker receipts.
+It also computes an informational VIC report for display.
 Positions/orders come from optional hero_telemetry.json (or bot_telemetry.json)
 and bear_telemetry.json. Only explicitly permitted fields are rendered;
 broker account balances and buying power are omitted. Team virtual allowances
@@ -104,7 +105,7 @@ def load_status(name):
             envelope=remote_report()
             if not envelope:return None,'No private telemetry received yet.','Supabase'
             snapshot=envelope['snapshot']
-            value={'paper':True,'heartbeat':snapshot.get('observed_at'),'teams':snapshot.get('teams',[])} if name=='teams' else snapshot.get(name) if name in ('supervisor','vic','overnight') else snapshot['reports'].get(name)
+            value={**(snapshot.get('engine_status') or {}),'paper':True,'heartbeat':snapshot.get('observed_at'),'teams':snapshot.get('teams',[])} if name=='teams' else snapshot.get(name) if name in ('supervisor','vic','overnight') else snapshot['reports'].get(name)
             return value,None,'Supabase'
         except Exception as exc:return None,f'Private telemetry unavailable ({type(exc).__name__}).','Supabase'
     paths = [BASE / f'{name}_telemetry.json']
@@ -328,7 +329,7 @@ def show_teams(now):
     if error:st.warning(error)
     if not teams:return False
     st.subheader('QQQ paper teams · current strategies + report winners')
-    st.caption('Updated roster: 18 teams · $5,000 virtual allowance each · $30,000 combined open-premium cap after the new engine starts. Paper P&L shown here excludes fees.')
+    st.caption('v1.7 roster: 10 active teams · $5,000 virtual allowance each · $30,000 combined open-premium cap after the new engine starts. Legacy positions remain managed. Paper P&L excludes fees.')
     if len(teams)<18:st.info(f'{len(teams)} teams reported by the current runtime. Start the updated Mac engine and uploader to connect the full roster.')
     show_market_direction(teams,now)
     lookup={t['team_id']:t for t in teams}
@@ -449,7 +450,7 @@ def mag7_context(asof):
 def rule_panel(df, vic_report=None):
     from team_settings import NAMES, EXIT_LABELS, ENTRY_LABELS
     from session_rules import ENTRY_WINDOW_LABEL
-    st.subheader('18-team strategy definitions')
+    st.subheader('Active and legacy strategy definitions')
     st.caption(ENTRY_WINDOW_LABEL+' · Active market context influences direction, priority, size and new-position thesis exits')
     for team,name in NAMES.items():
         st.write(team.upper()+': '+name)
@@ -810,7 +811,7 @@ def main():
         if st.button('Lock Terminal',width='stretch'):
             st.session_state.authenticated=False
             st.rerun()
-        st.caption('Monitor only · no order controls')
+    st.caption('Paper trading · dashboard controls')
     st.title('⚡ Victor Terminal')
     st.caption('Market overview · paper teams · news & events · research')
     import sys

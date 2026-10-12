@@ -1,4 +1,4 @@
-"""Approved Victor Terminal views. Display only; no broker or strategy mutations."""
+"""Victor Terminal views and fixed remote operating controls; no direct orders."""
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -7,8 +7,10 @@ import re
 from urllib.request import Request,urlopen
 import pandas as pd
 import streamlit as st
-from dashboard_data import num,change,fresh,team_totals,event_windows,daily_observation
+from dashboard_data import (num,change,fresh,team_totals,event_windows,daily_observation,
+    visible_team_ids,position_provenance_lines,overnight_health_lines)
 from team_settings import NAMES,ENTRY_LABELS
+import team_settings
 
 GREEN='#28cf85';RED='#ff6464';YELLOW='#f5c451';GRAY='#8b949e'
 MAG7=('AAPL','MSFT','AMZN','GOOGL','META','NVDA','TSLA')
@@ -20,6 +22,29 @@ def color(value):
 
 def pct(value):return f'{value:+.2f}%' if num(value) is not None else 'N/A'
 
+
+def vic_quality_lines(raw,now):
+    """Display the same allowlisted contract for both local and online views."""
+    from telemetry_link import sanitize_policy
+    policy=sanitize_policy(raw)
+    if not policy:return ['Shared VIC data quality unavailable.']
+    contract=policy.get('data_contract') or {};health=policy.get('feed_health') or {};macro=policy.get('macro_context') or {}
+    try:valid=pd.Timestamp(policy.get('valid_until'))>pd.Timestamp(now) and fresh(policy.get('at'),now,90)
+    except (TypeError,ValueError):valid=False
+    lines=['Decision context '+('current' if valid else 'expired / unavailable')+' · QQQ '+policy.get('qqq_data_status','UNKNOWN').replace('_',' ').lower(),
+        'Recorded feeds: stocks '+contract.get('effective_stock_feed','UNKNOWN')+' · options '+contract.get('effective_option_feed','UNKNOWN')+'. Paper fills do not establish executable market results.']
+    age=num(health.get('five_minute_bar_age_seconds'))
+    if age is not None:lines.append(f'QQQ completed 5-minute bar age: {age:.0f}s at the engine check. Policy expires after 90s; recomputation cannot refresh an old bar.')
+    if macro.get('status')=='ACTIVE_UNVALIDATED_HEURISTIC' and valid:
+        delta=num(macro.get('applied_score_delta'))
+        lines.append('Structured inflation surprise active · unvalidated 15-minute tilt '+(f'{delta:+.3f}' if delta is not None else 'unavailable')+' score points; no macro entry veto.')
+    else:lines.append('Structured actual/consensus influence unavailable or expired; zero new influence. A release-data provider has not been newly connected by this update.')
+    pending=[name for name,row in health.get('jobs',{}).items() if row.get('pending') and (num(row.get('pending_seconds')) or 0)>30]
+    errors=[name for name,row in health.get('jobs',{}).items() if row.get('error')]
+    if pending:lines.append('Slow background refresh: '+', '.join(sorted(pending))+'.')
+    if errors:lines.append('Source refresh needs attention: '+', '.join(sorted(errors))+'.')
+    return lines
+
 def quote_one(symbol):
     try:
         import yfinance as yf
@@ -30,7 +55,7 @@ def quote_one(symbol):
         at=pd.Timestamp(stamp,unit='s',tz='UTC').isoformat() if num(stamp) else None
         value=num(info.get('regularMarketPrice'));prior=num(info.get('regularMarketPreviousClose'))
         delta,relative=change(value,prior)
-        # Provider supplies no timestamp for these fields.
+        # This source supplies no bid/ask observation timestamp. Never imply freshness.
         bid=ask=None
         prior_change=None
         if symbol in MAG7:
@@ -51,6 +76,8 @@ def public_market(symbol):
 
 @st.cache_data(ttl=300,show_spinner=False)
 def treasury():
+    # Fetch separately: the combined endpoint can return decades of history even
+    # with cosd, exceeding the old 200 kB read and truncating current observations.
     from dashboard_status import fetch_treasury
     return fetch_treasury(pd.Timestamp.now(tz='America/New_York'))
 
@@ -84,8 +111,9 @@ def market_cards(d,symbol,market,teams,vic,now):
     with cols[0]:
         note=f"{d.money(q.get('change'))} / {pct(q.get('change_pct'))} vs previous close {d.money(q.get('prior'))}"
         d.card(symbol+' price',d.money(q.get('value')),note,color(q.get('change')))
+        st.caption('Bid/ask hidden: source does not provide quote timestamps.')
         st.caption('Price time '+d.display_time(q.get('at'))+' · Yahoo indicative / delayed')
-        st.caption('Bid/ask hidden: provider timestamps unavailable; not execution quotes.')
+
     with cols[1]:
         bias=direction.get('bias','Unavailable');score=num(direction.get('score'));coverage=num(direction.get('coverage'))
         d.card('VIC shared direction',bias,'Score '+(f'{score:+.2f}' if score is not None else 'N/A')+' · heuristic, not probability',GREEN if bias=='BULLISH' else RED if bias=='BEARISH' else GRAY if bias=='Unavailable' else YELLOW)
@@ -95,6 +123,8 @@ def market_cards(d,symbol,market,teams,vic,now):
             st.caption('15-minute view: '+str(policy.get('regime','UNKNOWN'))+' · '+str(policy.get('confidence','LOW')))
             st.caption('Team 7 daily view: '+str(policy.get('daily_outlook',{}).get('bias','UNKNOWN'))+' · unvalidated forecast')
             if policy.get('missing'):st.caption('Missing or stale: '+', '.join(policy['missing']))
+            with st.expander('Shared VIC · data quality'):
+                for line in vic_quality_lines(policy,now):st.caption(line)
         st.caption('Previous-session QQQ technical bias: '+vic.get('_previous_technical','Unavailable')+' · completed close vs EMA9/21')
     with cols[2]:
         yields=treasury();ten=yields.get('DGS10',{});two=yields.get('DGS2',{})
@@ -103,9 +133,11 @@ def market_cards(d,symbol,market,teams,vic,now):
                (f'{delta*100:+.1f} bp · {pct(ten.get("change_pct"))}' if delta is not None else 'Daily change unavailable'),color(delta))
         st.caption('Previous '+(f'{ten["prior"]:.2f}%' if ten.get('prior') is not None else 'N/A')+' · 2-year '+(f'{two["value"]:.2f}%' if two.get('value') is not None else 'N/A'))
         if two.get('change') is not None:st.caption(f'2-year {two["change"]*100:+.1f} bp · {pct(two.get("change_pct"))}')
-        st.caption('FRED daily observations · 10-year '+str(ten.get('date','unavailable'))+' · 2-year '+str(two.get('date','unavailable'))+' · not intraday')
-        for label,row in [('10-year',ten),('2-year',two)]:
-            if row.get('error'):st.caption(label+' yield unavailable: '+row['error'])
+        st.caption('FRED daily observation '+str(ten.get('date','unavailable'))+' · not intraday')
+        for series in ('DGS10','DGS2'):
+            row=yields.get(series,{})
+            if row.get('error'):st.caption(series+' refresh failed: '+row['error']+'. No substitute yield is shown.')
+            elif row.get('date'):st.caption(series+' observation date: '+row['date'])
     with cols[3]:
         v=market.get('^VIX',{});vxn=market.get('^VXN',{})
         d.card('VIX',f'{v["value"]:.2f}' if v.get('value') is not None else 'N/A',pct(v.get('change_pct'))+' vs previous close',color(v.get('change')))
@@ -158,7 +190,13 @@ def teams_panel(d,teams,source,now,summary_only=False):
             if (num(p.get('remaining_qty')) or 0)>0 and not fresh(p.get('quote_at'),now,30):
                 p['unrealized_pnl']=None;t['unrealized_pnl']=None
     totals=team_totals(displayteams,now.date())
+    active_ids=tuple(getattr(team_settings,'ACTIVE_TEAM_IDS',NAMES))
+    visible_ids=visible_team_ids(displayteams,active_ids)
+    legacy_ids=[team for team in visible_ids if team not in active_ids]
     st.subheader('Paper teams · '+now.strftime('%b %d')+' ET')
+    st.caption(f'{len(active_ids)} configured entry teams · roster '+str(getattr(team_settings,'ROSTER_VERSION','legacy'))+'. Historical owner records are retained.')
+    if legacy_ids:
+        st.warning('Inactive teams still have open positions or unresolved orders: '+', '.join(legacy_ids)+'. They remain visible for exit and order management; new entries are disabled.')
     if totals:
         stale=any(not fresh(t.get('heartbeat'),now) for t in teams if t.get('day')==str(now.date()))
         if stale:st.warning('Stale team reports: the displayed totals are the last reported values, not confirmed current activity.')
@@ -170,34 +208,43 @@ def teams_panel(d,teams,source,now,summary_only=False):
             ('Closed-day balance · virtual',d.money(totals['closed_balance']),'Starting '+d.money(totals['starting'])+' + closed P/L')]
         for col,(label,value,note) in zip(cols,labels):
             with col:d.card(label,value,note)
-        st.caption(f"{totals['teams']} reporting teams · closed trades {totals['closed_trades']} · wins {totals['wins']} · losses {totals['losses']} · all realized exits (including partials) {d.money(totals['realized'])} gross. Virtual allowances are not broker equity or buying power.")
-        if totals['pending']:st.info('An entry has an unregistered partial fill. Exposure and active-balance totals are incomplete.')
+        st.caption(f"{totals['teams']} reporting owner records, including legacy history · closed trades {totals['closed_trades']} · wins {totals['wins']} · losses {totals['losses']} · all realized exits (including partials) {d.money(totals['realized'])} gross. Totals retain every reported owner's cash flow. Virtual allowances are not broker equity or buying power.")
+        if totals['pending']:st.info('An entry remainder is still pending. Filled contracts are managed; aggregate balances remain conservative until the order is resolved.')
     else:st.info('No team reports dated today. Historical reports are available in team details.')
     if summary_only:
-        scanning=sum(t.get('health')=='SCANNING' and fresh(t.get('heartbeat'),now) and t.get('day')==str(now.date()) for t in teams)
+        scanning=sum(t.get('team_id') in active_ids and t.get('entry_enabled') is not False and t.get('health')=='SCANNING' and fresh(t.get('heartbeat'),now) and t.get('day')==str(now.date()) for t in teams)
         st.caption(f'{scanning} teams reporting SCANNING · {len(teams)} connected roster records · '+str(source or 'not connected'))
         return
     lookup={t['team_id']:t for t in displayteams}
     def select_team(teamid):st.session_state.team_detail=teamid
-    selected=st.selectbox('Select a team for strategy, positions and activity',list(NAMES),format_func=lambda x:x.replace('team','Team ').replace('report','Report ')+' · '+NAMES[x],key='team_detail')
-    for start in range(0,len(NAMES),3):
-        ids=list(NAMES)[start:start+3]
+    archived=[team for team in NAMES if team not in visible_ids and team in lookup]
+    show_history=st.checkbox('Show inactive team history',value=False,key='show_inactive_team_history') if archived else False
+    detail_ids=visible_ids+archived if show_history else visible_ids
+    if st.session_state.get('team_detail') not in detail_ids:st.session_state.team_detail=detail_ids[0]
+    selected=st.selectbox('Select a team for strategy, positions and activity',detail_ids,format_func=lambda x:x.replace('team','Team ').replace('report','Report ')+' · '+NAMES[x],key='team_detail')
+    for start in range(0,len(visible_ids),3):
+        ids=visible_ids[start:start+3]
         for col,teamid in zip(st.columns(3),ids):
             with col:
                 t=lookup.get(teamid,{})
                 st.markdown('#### '+teamid.replace('team','Team ').replace('report','Report '))
                 st.caption(NAMES[teamid])
-                state=t.get('health','NOT CONNECTED') if fresh(t.get('heartbeat'),now) else 'STALE / OFFLINE' if t else 'NOT CONNECTED'
+                if teamid not in active_ids or t.get('entry_enabled') is False:
+                    st.caption('New entries disabled · legacy position and order management only')
+                state=t.get('health','UNCONFIRMED') if fresh(t.get('heartbeat'),now) else 'STALE REPORT' if t else 'NO REPORT RECEIVED'
                 active=[p for p in t.get('trades',[]) if (num(p.get('remaining_qty')) or 0)>0]
-                if active and state not in {'STALE / OFFLINE','NOT CONNECTED'}:state += ' · OPEN '+('CALL' if active[0].get('owner')=='HERO' else 'PUT')
+                if active and state not in {'STALE REPORT','NO REPORT RECEIVED'}:state += ' · OPEN '+('CALL' if active[0].get('owner')=='HERO' else 'PUT')
                 st.write(state)
+                if t.get('pending_entry') or (num(t.get('pending_orders')) or 0)>0:
+                    st.caption('Unresolved orders remain; entry fills may be partial.')
                 st.caption('Report date '+str(t.get('day') or 'N/A')+' · '+d.display_time(t.get('heartbeat')))
                 d.card('Reported realized P/L · gross',d.money(t.get('realized_pnl')),'Open mark '+d.money(t.get('unrealized_pnl')),color(t.get('realized_pnl')))
                 st.button('View strategy & activity',key='view_'+teamid,on_click=select_team,args=(teamid,))
     t=lookup.get(selected,{})
     st.divider();st.subheader(NAMES[selected]+' · detail')
+    st.caption('Current configured strategy; recorded trades below retain their entry-time rules.')
     st.write(ENTRY_LABELS[selected])
-    if not t:st.info('This team has not supplied a report.');return
+    if not t:st.info('No report has reached this dashboard for this team. Check the Mac connection and QQQ service status above; missing telemetry does not confirm that the engine is stopped.');return
     st.caption('Current configured exit policy: '+t.get('exit_policy','Unavailable')+' Position-specific historical policy may differ.')
     policy=t.get('vic_policy') or {}
     if policy:
@@ -205,6 +252,17 @@ def teams_panel(d,teams,source,now,summary_only=False):
     if selected=='team7':
         st.info('One morning entry, then hold until 15:45 ET. No routine stop-loss or profit-taking. Paper experiment.')
         st.caption('Daily shot '+('used' if t.get('entry_used') else 'not yet used')+' · Daily outlook '+str(policy.get('daily_outlook',{}).get('bias','UNKNOWN')))
+    if selected in ('team1','team3'):
+        st.caption('Team allowance stays $5,000 virtual · new-entry premium cap $2,500 · current allowance '+d.money(t.get('entry_budget')))
+        st.caption('Estimated-net daily loss trigger '+d.money(t.get('daily_loss_allowance'))+' · '+('TRIGGERED: new entries paused; close requested' if t.get('risk_latched') else 'not reported triggered')+'. Fill prices can pass the trigger.')
+        plans=[]
+        for owner,decision in t.get('decisions',{}).items():
+            plan=decision.get('team13_plan') or decision.get('team13_plan_observation')
+            if plan:plans.append({'Side':owner.upper(),'Status':plan.get('status'),'Armed ET':d.display_time(plan.get('armed_at')),
+                'Confirmation bar ET':d.display_time(plan.get('confirm_bar_end')),'Zone low':plan.get('fill_zone_low'),'Zone high':plan.get('fill_zone_high'),
+                'Stop':plan.get('stop_price'),'Target':plan.get('target_level')})
+        if plans:st.dataframe(plans,hide_index=True,width='stretch')
+        else:st.caption('No current frozen entry plan reported. Native setup must arm a plan before next-candle confirmation.')
     for position in t.get('trades',[]):
         entry=position.get('market_entry') or {}
         if entry.get('reason'):
@@ -221,7 +279,9 @@ def teams_panel(d,teams,source,now,summary_only=False):
           'Filled qty':p.get('quantity'),'Remaining qty':q,'Entry fill':entry,'Exit fill':p.get('exit_price'),
           'Active premium':cost if q else 0,'Market value':cost+u if q and cost is not None and u is not None else 0 if q==0 else None,
           'Open mark P/L':u,'Realized P/L gross':p.get('realized_pnl'),'Quote ET':d.display_time(p.get('quote_at')),
-          'Exit reason':p.get('exit_reason'),'Setup':p.get('setup')})
+          'Exit reason':p.get('exit_reason'),'Setup':p.get('setup'),
+          'Recorded strategy version':(p.get('strategy_provenance') or {}).get('strategy_version','Unavailable'),
+          'Signal cluster':p.get('signal_cluster')})
     if rows:
         st.markdown('#### Open positions')
         st.dataframe([r for r in rows if (r['Remaining qty'] or 0)>0],hide_index=True,width='stretch')
@@ -229,7 +289,15 @@ def teams_panel(d,teams,source,now,summary_only=False):
         st.dataframe([r for r in rows if r['Remaining qty']==0],hide_index=True,width='stretch')
         for i,p in enumerate(trades):
             with st.expander(str(p.get('symbol'))+' · entry context / exit fills · '+str(i+1)):
+                for line in position_provenance_lines(p):st.caption(line)
+                if p.get('signal_cluster'):st.caption('Signal cluster: '+str(p['signal_cluster']))
                 st.caption('Entry context at '+d.display_time(p.get('market_entry',{}).get('at'))+' · policy '+str(p.get('market_policy_version') or 'Not supplied'))
+                plan=p.get('team13_plan') or {}
+                if plan:
+                    st.caption('Recorded trade policy '+plan['version']+' · risk ceiling '+d.money(plan.get('risk_ceiling'))+' · maximum hold '+str(plan.get('max_hold_minutes'))+' minutes. Triggers are not guaranteed fills.')
+                    st.dataframe([{'Entry zone low':plan.get('fill_zone_low'),'Entry zone high':plan.get('fill_zone_high'),
+                        'Frozen stop':plan.get('stop_price'),'Frozen target':plan.get('target_level'),'Ordered premium':plan.get('ordered_premium')}],hide_index=True,width='stretch')
+                elif selected in ('team1','team3'):st.caption('Historical position: the new Team1/3 risk policy was not recorded on this trade.')
                 st.json(p.get('market_entry',{}));st.dataframe(p.get('exit_fills',[]),hide_index=True,width='stretch')
     else:st.info('No reported trades for this report date.')
     st.markdown('#### Latest decisions and chart observations')
@@ -263,72 +331,87 @@ def news_panel(d,vic,now):
 def render(d,auto):
     @st.fragment(run_every='15s' if auto else None)
     def body():
-        now=d.datetime.now(d.ET)
-        raw,error,source=d.load_status('teams')
-        from telemetry_link import sanitize_teams
-        teams=sanitize_teams(raw)
-        overnight,overnight_error,_=d.load_status('overnight')
-        if error:st.warning(error)
-        overview,teamtab,news,research=st.tabs(['Overview','Teams & activity','News & events','Research'])
-        with overview:
-            c1,c2,c3=st.columns([3,1,1])
-            symbol=c1.text_input('Stock / ETF symbol',value='QQQ',key='analysis_ticker').strip().upper()
-            minutes=c2.selectbox('Chart interval',[5,15,30,60],format_func=lambda v:f'{v}m')
-            days=c3.selectbox('Sessions',[1,2,3,4,5])
-            if not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-]{0,14}',symbol):st.info('Enter a valid stock or ETF symbol.');return
-            options=st.columns(6)
-            toggles={label:col.toggle(label,value=default,key='indicator_'+label) for col,(label,default) in zip(options,[('BBands',True),('RSI',True),('Volume',True),('EMA9',False),('EMA21',False),('VWAP',False)])}
-            df=None
-            try:
-                rawbars=d.fetch_bars(symbol);base=d.prepare_bars(rawbars,now);df=d.prepare_bars(rawbars,now,minutes)
-            except Exception as exc:st.warning('Completed chart candles unavailable ('+type(exc).__name__+').')
+        from operations_panel import load_context, render_connection, render_controls
+        context=load_context(d)
+        render_connection(context)
+        qqq_section,beta_section=st.tabs(['QQQ Terminal','Beta Research'])
+        with beta_section:
+            render_controls(context,scope='beta')
+            from beta_panel.integration import render_beta
+            render_beta(d)
+        with qqq_section:
+            render_controls(context,scope='qqq')
+            now=d.datetime.now(d.ET)
+            raw,error,source=d.load_status('teams')
+            from telemetry_link import sanitize_teams,sanitize_engine_status
+            teams=sanitize_teams(raw)
             executor,_,_=d.load_status('vic')
-            # Shared direction comes from Mac telemetry; display-only calendars cannot change it.
-            vic=d.vic_dashboard_report(base if df is not None else None,symbol,now)
-            if executor:vic['market_direction']=executor.get('market_direction',{})
-            try:
-                qqqbase=base if symbol=='QQQ' and df is not None else d.prepare_bars(d.fetch_bars('QQQ'),now)
-                prior=qqqbase[qqqbase.index.date<now.date()]
-                if not prior.empty:
-                    row=prior.iloc[-1]
-                    vic['_previous_technical']='Bullish' if row.Close>row.EMA9>row.EMA21 else 'Bearish' if row.Close<row.EMA9<row.EMA21 else 'Mixed'
-            except Exception:pass
-            market_cards(d,symbol,public_market(symbol),teams,vic,now)
-            overnight_panel(d,overnight,now)
-            if df is not None:
-                d.render_chart(df,days,toggles['BBands'],False,toggles['VWAP'],symbol,orb_source=base,
-                               rsi=toggles['RSI'],volume=toggles['Volume'],ema9=toggles['EMA9'],ema21=toggles['EMA21'])
-                st.caption(f'{minutes}m completed candles · Eastern time · Yahoo Finance may be delayed · latest displayed session {df.index[-1].date()} · chart toggles affect display only.')
-                if df.index[-1].date()!=now.date():st.info('Historical chart session; this is not today’s activity.')
-            events_panel(d,vic,now,today_only=True)
-            teams_panel(d,teams,source,now,summary_only=True)
-        with teamtab:
-            teams_panel(d,teams,source,now)
-            if not teams:
-                reports={n:d.load_status(n) for n in ('hero','bear')}
-                d.show_pipeline(reports['hero'][0],reports,now)
-        with news:news_panel(d,vic,now)
-        with research:
-            overnight_panel(d,overnight,now,details=True)
-            st.subheader('Stock analysis & simulation research')
-            st.caption('Selected asset '+symbol+' · paper-trading universe remains QQQ')
-            d.financial_panel(symbol);d.fund_sections(df,symbol)
-            with st.expander('Strategy rules and QQQ chart inputs'):
-                qqq=df if symbol=='QQQ' and minutes==5 else None
-                if qqq is None:
-                    try:qqq=d.prepare_bars(d.fetch_bars('QQQ'),now)
-                    except Exception:pass
-                d.rule_panel(qqq,vic)
-            with st.expander('Saved simulation experiments'):
-                from simulation_lab import render
-                render()
-            supervisor,err,_=d.load_status('supervisor')
-            with st.expander('AI supervisor · session research'):
-                if supervisor:
-                    st.caption(str(supervisor.get('date','')));st.write(supervisor.get('summary',''))
-                    st.write(supervisor.get('ai_text',''));st.dataframe(supervisor.get('recommendations',[]),hide_index=True,width='stretch')
-                else:st.info(err or 'No supervisor report connected.')
-        st.caption('Victor Terminal · paper telemetry · '+now.strftime('%H:%M:%S ET'))
+            engine=sanitize_engine_status(raw) or sanitize_engine_status((executor or {}).get('engine_status'))
+            if engine:
+                reconciliation=engine.get('reconciliation',{})
+                st.caption(engine['release']+' · reconciliation '+str(reconciliation.get('status','UNKNOWN'))+' · '+d.display_time(reconciliation.get('checked_at')))
+                if reconciliation.get('status')=='ATTENTION_ENTRIES_PAUSED':st.warning('New entries paused for reconciliation; the engine continues checking known positions. Review the local engine for details.')
+            overnight,overnight_error,_=d.load_status('overnight')
+            if error:st.warning(error)
+            overview,teamtab,news,research=st.tabs(['Overview','Teams & activity','News & events','QQQ research'])
+            with overview:
+                c1,c2,c3=st.columns([3,1,1])
+                symbol=c1.text_input('Stock / ETF symbol',value='QQQ',key='analysis_ticker').strip().upper()
+                minutes=c2.selectbox('Chart interval',[5,15,30,60],format_func=lambda v:f'{v}m')
+                days=c3.selectbox('Sessions',[1,2,3,4,5])
+                if not re.fullmatch(r'[A-Z0-9][A-Z0-9.\-]{0,14}',symbol):st.info('Enter a valid stock or ETF symbol.');return
+                options=st.columns(6)
+                toggles={label:col.toggle(label,value=default,key='indicator_'+label) for col,(label,default) in zip(options,[('BBands',True),('RSI',True),('Volume',True),('EMA9',False),('EMA21',False),('VWAP',False)])}
+                df=None
+                try:
+                    rawbars=d.fetch_bars(symbol);base=d.prepare_bars(rawbars,now);df=d.prepare_bars(rawbars,now,minutes)
+                except Exception as exc:st.warning('Completed chart candles unavailable ('+type(exc).__name__+').')
+                # Shared direction comes from Mac telemetry; display-only calendars cannot change it.
+                vic=d.vic_dashboard_report(base if df is not None else None,symbol,now)
+                if executor:vic['market_direction']=executor.get('market_direction',{})
+                try:
+                    qqqbase=base if symbol=='QQQ' and df is not None else d.prepare_bars(d.fetch_bars('QQQ'),now)
+                    prior=qqqbase[qqqbase.index.date<now.date()]
+                    if not prior.empty:
+                        row=prior.iloc[-1]
+                        vic['_previous_technical']='Bullish' if row.Close>row.EMA9>row.EMA21 else 'Bearish' if row.Close<row.EMA9<row.EMA21 else 'Mixed'
+                except Exception:pass
+                market_cards(d,symbol,public_market(symbol),teams,vic,now)
+                overnight_panel(d,overnight,now)
+                if df is not None:
+                    d.render_chart(df,days,toggles['BBands'],False,toggles['VWAP'],symbol,orb_source=base,
+                                   rsi=toggles['RSI'],volume=toggles['Volume'],ema9=toggles['EMA9'],ema21=toggles['EMA21'])
+                    st.caption(f'{minutes}m completed candles · Eastern time · Yahoo Finance may be delayed · latest displayed session {df.index[-1].date()} · chart toggles affect display only.')
+                    if df.index[-1].date()!=now.date():st.info('Historical chart session; this is not today’s activity.')
+                events_panel(d,vic,now,today_only=True)
+                teams_panel(d,teams,source,now,summary_only=True)
+            with teamtab:
+                teams_panel(d,teams,source,now)
+                if not teams:
+                    reports={n:d.load_status(n) for n in ('hero','bear')}
+                    d.show_pipeline(reports['hero'][0],reports,now)
+            with news:news_panel(d,vic,now)
+            with research:
+                overnight_panel(d,overnight,now,details=True)
+                st.subheader('Stock analysis & simulation research')
+                st.caption('Selected asset '+symbol+' · paper-trading universe remains QQQ')
+                d.financial_panel(symbol);d.fund_sections(df,symbol)
+                with st.expander('Strategy rules and QQQ chart inputs'):
+                    qqq=df if symbol=='QQQ' and minutes==5 else None
+                    if qqq is None:
+                        try:qqq=d.prepare_bars(d.fetch_bars('QQQ'),now)
+                        except Exception:pass
+                    d.rule_panel(qqq,vic)
+                with st.expander('Saved simulation experiments'):
+                    from simulation_lab import render
+                    render()
+                supervisor,err,_=d.load_status('supervisor')
+                with st.expander('AI supervisor · session research'):
+                    if supervisor:
+                        st.caption(str(supervisor.get('date','')));st.write(supervisor.get('summary',''))
+                        st.write(supervisor.get('ai_text',''));st.dataframe(supervisor.get('recommendations',[]),hide_index=True,width='stretch')
+                    else:st.info(err or 'No supervisor report connected.')
+        st.caption('Victor Terminal · paper telemetry · '+d.datetime.now(d.ET).strftime('%H:%M:%S ET'))
     body()
 
 
@@ -342,6 +425,7 @@ def overnight_panel(d,raw,now,details=False):
         return
     st.caption('Session '+str(b.get('session_date'))+' · '+str(b.get('slot'))+' · '+research_status(b,now)+' · issued '+d.display_time(b.get('issued_at')))
     st.caption('Research worker: '+str(data.get('worker_status'))+' · heartbeat '+d.display_time(data.get('heartbeat')))
+    for line in overnight_health_lines(b):st.caption(line)
     for line in ai_schedule_lines(data,b,now):st.caption(line)
     if (b.get('ai') or {}).get('status')=='REQUEST_FAILED':
         st.warning('AI synthesis failed. The deterministic forecast is still shown; check the research service diagnostic before relying on AI analysis.')
@@ -372,4 +456,3 @@ def overnight_panel(d,raw,now,details=False):
     if b.get('economic_releases'):st.dataframe(b['economic_releases'],hide_index=True,width='stretch')
     for warning in b.get('warnings',[]):st.caption(warning)
     st.caption('Frozen forecast ID: '+str(b.get('forecast_id'))+' · both morning briefings are included in the daily PDF.')
-

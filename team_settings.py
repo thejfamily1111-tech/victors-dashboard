@@ -66,5 +66,29 @@ for _number, (_label,_minutes,_trades,_net) in REPORT_WINNERS.items():
 NAMES['team7']='VIC daily direction / one morning entry'
 ENTRY_LABELS['team7']='09:30 <= entry < 10:00 ET; one submission per session; valid 09:15/09:25 overnight forecast agrees with all six daily VIC factors and the expected move from entry to the hold-exit price; confirmed local one-minute pullback. Up to $5,000 premium, standard QQQ 1–3 DTE / 0.40–0.60 absolute delta. No future low, forced deadline entry, top-up or re-entry.'
 EXIT_LABELS['team7']='Hold all filled contracts until 15:45 ET (15 minutes before an early close). No routine premium stop, profit target, trailing floor or VIC reversal exit. Manual flatten remains available. Entire paid premium is at risk; paper experiment.'
-ENTRY_LABELS['team1']+=' VIC v2 pilot requires EMA momentum AND directional RSI; volume or VIC alone cannot supply confirmation.'
-ENTRY_LABELS['team3']+=' VIC v2 ranks valid sides and changes premium allocation; its chart-only setup remains independent.'
+ENTRY_LABELS['team1']+=' Shared VIC pilot requires EMA momentum AND directional RSI; volume or VIC alone cannot supply confirmation.'
+ENTRY_LABELS['team3']+=' Shared VIC ranks valid sides and changes premium allocation; its chart-only setup remains independent.'
+
+# October 9 prospective paper revision: virtual equity remains $5,000.
+NAMES['team1']='Confirmed level / ORB momentum'
+NAMES['team3']='Confirmed price action'
+for _id in ('team1','team3'):
+    ENTRY_LABELS[_id]+=' v1.5: native setup arms a frozen plan; next completed 5-minute candle must confirm the side with EMA9 or VWAP support, intact stop, half-ATR entry zone and at least 0.5R room. Plan expires after one confirmation candle / 90-second entry TTL. Shared VIC ranks and sizes valid setups; no macro disagreement veto. Maximum $2,500 entry premium; 5-minute cooldown after exit.'
+    EXIT_LABELS[_id]='v1.5 new positions: loss trigger min($250,10% actual filled premium); profit floor arms at +0.5R and retains 50% of observed peak; half at +1R, all at +2R (one contract closes at +1R); maximum hold 15 minutes. Preserve earlier structural/native/session exits. $750 estimated-net daily loss trigger pauses entries and requests close. Thresholds are triggers, not guaranteed fills. Older positions keep recorded trade policy.'
+
+# Ten prospective paper experiments. Keep all legacy definitions above so saved
+# positions remain owned and can close after an entry-roster change.
+ROSTER_VERSION = 'paper10-2026-10-12-v1'
+ACTIVE_TEAM_IDS = ('team1','team2','team3','team4','team5','team6','team7',
+                   'report8','report21','report25')
+DISPLAY_TEAM_NUMBERS = {**{f'team{i}':i for i in range(1,8)},
+                        'report8':8,'report21':9,'report25':10}
+NAMES['report8'] = 'Team 8: 15-minute wick reversal (research 8)'
+NAMES['report21'] = 'Team 9: EMA5/9 + RVOL + ADX (research 21)'
+NAMES['report25'] = 'Team 10: Bollinger compression / expansion (research 25)'
+for _id in ('report8','report21','report25'):
+    ENTRY_LABELS[_id] = ('Native research '+str(int(_id[6:]))+' entry at its recorded timeframe. '
+        'Selected for a prospective controlled comparison; historical profits are not a promotion criterion. '
+        'Shared causal VIC context ranks valid sides and reduces size when evidence is incomplete or opposed. '
+        'Macro context cannot manufacture a chart setup or veto solely on VIX.')
+    EXIT_LABELS[_id] += ' Native exits retained; no pooled holding-time optimization applied.'
