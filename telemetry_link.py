@@ -1,9 +1,13 @@
 """Read-only dashboard / write-only Mac transport. No broker API dependencies."""
 from datetime import datetime, timezone
+import base64
+import binascii
+import hashlib
 import json
 import math
 import re
 import ssl
+import zlib
 from urllib import request, error
 
 MAX_BYTES = 1_000_000
@@ -11,6 +15,8 @@ MAX_BYTES = 1_000_000
 # for PostgreSQL's canonical JSON representation and the RPC envelope.
 SNAPSHOT_BUDGET = 850_000
 BETA_ERRORS = {'BETA_UNAVAILABLE', 'BETA_INVALID', 'BETA_TOO_LARGE'}
+BETA_LOGICAL_MAX_BYTES = 8_000_000
+BETA_PACKED_ENCODING = 'zlib-base64-v1'
 CONTROL_KEYS = ('qqq_trading_enabled', 'qqq_research_enabled',
                 'overnight_research_enabled', 'vic_enabled', 'beta_engine_enabled')
 COMPONENT_KEYS = {'qqq_trading', 'qqq_research', 'overnight_research', 'vic', 'beta_engine'}
@@ -305,7 +311,52 @@ def sanitize_vic(raw):
                           'valid_until':stamp(permission.get('valid_until'))}}
 
 
-def sanitize_snapshot(raw):
+def _beta_packed(beta):
+    """Lossless wire representation of an already validated Beta snapshot."""
+    data=json.dumps(beta,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode('utf-8')
+    if len(data)>BETA_LOGICAL_MAX_BYTES:
+        raise ValueError('Beta report exceeds logical size limit')
+    return {'encoding':BETA_PACKED_ENCODING,'raw_bytes':len(data),
+            'sha256':hashlib.sha256(data).hexdigest(),
+            'payload':base64.b64encode(zlib.compress(data,9)).decode('ascii')}
+
+
+def _beta_unpacked(packed):
+    """Decode one bounded zlib stream; reject bombs, corruption and extra data."""
+    if not isinstance(packed,dict) or set(packed)!={'encoding','raw_bytes','sha256','payload'}:
+        raise ValueError('Invalid compressed Beta envelope')
+    length=packed.get('raw_bytes');digest=packed.get('sha256');payload=packed.get('payload')
+    if (packed.get('encoding')!=BETA_PACKED_ENCODING or type(length) is not int
+            or not 0<length<=BETA_LOGICAL_MAX_BYTES
+            or not isinstance(digest,str) or not re.fullmatch('[a-f0-9]{64}',digest)
+            or not isinstance(payload,str) or not 0<len(payload)<=SNAPSHOT_BUDGET):
+        raise ValueError('Invalid compressed Beta limits')
+    try:
+        compressed=base64.b64decode(payload,validate=True)
+        decoder=zlib.decompressobj()
+        data=decoder.decompress(compressed,length+1)
+    except (ValueError,binascii.Error,zlib.error):
+        raise ValueError('Invalid compressed Beta data') from None
+    # Do not call flush(): it has no output-size bound. A complete stream must
+    # reach EOF within the advertised cap, with no second stream or trailing data.
+    if (len(data)!=length or not decoder.eof or decoder.unconsumed_tail or decoder.unused_data
+            or hashlib.sha256(data).hexdigest()!=digest):
+        raise ValueError('Compressed Beta integrity check failed')
+    try:
+        decoded=json.loads(data,parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (ValueError,UnicodeDecodeError,RecursionError):
+        raise ValueError('Invalid compressed Beta JSON') from None
+    if not isinstance(decoded,dict):
+        raise ValueError('Invalid compressed Beta document')
+    return decoded
+
+
+def sanitize_snapshot(raw, *, wire=True):
+    """Allowlist a snapshot, optionally decoding its lossless Beta wire payload.
+
+    Uploader/RPC writes use the default bounded wire form. Dashboard reads use
+    wire=False only after the received envelope has passed the network byte cap.
+    """
     if not isinstance(raw,dict) or raw.get('schema')!=1 or raw.get('paper') is not True:
         raise ValueError('Invalid paper report format')
     reports=raw.get('reports')
@@ -319,22 +370,28 @@ def sanitize_snapshot(raw):
             'vic':vic, 'teams':sanitize_teams(raw.get('teams')),'engine_status':engine,
             'supervisor':sanitize_supervisor(raw.get('supervisor')),'overnight':telemetry(raw.get('overnight'))}
     out['beta']=None
+    out['beta_compressed']=None
     out['beta_error']=enum(raw.get('beta_error'),BETA_ERRORS)
-    if raw.get('beta') is not None:
+    if raw.get('beta') is not None or raw.get('beta_compressed') is not None:
         try:
             from beta_panel.snapshot import validate
-            out['beta']=validate(raw['beta'],enforce_limit=False)
+            if raw.get('beta') is not None and raw.get('beta_compressed') is not None:
+                raise ValueError('Ambiguous Beta document')
+            beta=raw['beta'] if raw.get('beta') is not None else _beta_unpacked(raw['beta_compressed'])
+            out['beta']=validate(beta)
             out['beta_error']=None
         except (ValueError,TypeError,OverflowError,RecursionError,ImportError):
             out['beta_error']='BETA_INVALID'
     out['control_status']=sanitize_controller(raw.get('control_status'))
-    # Never drop only some positions/orders and imply a complete portfolio.
-    # If Beta does not fit, preserve the entire QQQ report and say why Beta is
-    # unavailable. This also makes sanitize_snapshot idempotent across RPCs.
-    if len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET and out['beta'] is not None:
+    # Keep all positions, orders and research. Compression changes only how the
+    # document travels through the existing SQL mailbox, never its logical data.
+    if wire and len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET and out['beta'] is not None:
+        out['beta_compressed']=_beta_packed(out['beta'])
         out['beta']=None
+    if wire and len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET and out['beta_compressed'] is not None:
+        out['beta_compressed']=None
         out['beta_error']='BETA_TOO_LARGE'
-    if len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET:
+    if wire and len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET:
         raise ValueError('QQQ and controller report exceeds telemetry size limit')
     return out
 
@@ -481,7 +538,7 @@ def fetch_remote(url,key,reader_token):
     if not isinstance(envelope,dict): raise LinkError('Invalid report envelope')
     try:
         return {'received_at':stamp(envelope.get('received_at')),
-                'snapshot':sanitize_snapshot(envelope.get('snapshot'))}
+                'snapshot':sanitize_snapshot(envelope.get('snapshot'),wire=False)}
     except ValueError: raise LinkError('Invalid paper telemetry report') from None
 
 
