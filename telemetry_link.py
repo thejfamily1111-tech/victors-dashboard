@@ -17,6 +17,8 @@ SNAPSHOT_BUDGET = 850_000
 BETA_ERRORS = {'BETA_UNAVAILABLE', 'BETA_INVALID', 'BETA_TOO_LARGE'}
 BETA_LOGICAL_MAX_BYTES = 8_000_000
 BETA_PACKED_ENCODING = 'zlib-base64-v1'
+SNAPSHOT_LOGICAL_MAX_BYTES = 16_000_000
+SNAPSHOT_HEADERS = ('schema', 'paper', 'observed_at', 'reports', 'control_status', 'beta_error')
 CONTROL_KEYS = ('qqq_trading_enabled', 'qqq_research_enabled',
                 'overnight_research_enabled', 'vic_enabled', 'beta_engine_enabled')
 COMPONENT_KEYS = {'qqq_trading', 'qqq_research', 'overnight_research', 'vic', 'beta_engine'}
@@ -311,23 +313,23 @@ def sanitize_vic(raw):
                           'valid_until':stamp(permission.get('valid_until'))}}
 
 
-def _beta_packed(beta):
-    """Lossless wire representation of an already validated Beta snapshot."""
-    data=json.dumps(beta,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode('utf-8')
-    if len(data)>BETA_LOGICAL_MAX_BYTES:
-        raise ValueError('Beta report exceeds logical size limit')
+def _packed_document(document, logical_limit):
+    """Lossless wire representation; callers supply already sanitized data."""
+    data=json.dumps(document,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode('utf-8')
+    if len(data)>logical_limit:
+        raise ValueError('Report exceeds logical size limit')
     return {'encoding':BETA_PACKED_ENCODING,'raw_bytes':len(data),
             'sha256':hashlib.sha256(data).hexdigest(),
             'payload':base64.b64encode(zlib.compress(data,9)).decode('ascii')}
 
 
-def _beta_unpacked(packed):
+def _unpacked_document(packed, logical_limit):
     """Decode one bounded zlib stream; reject bombs, corruption and extra data."""
     if not isinstance(packed,dict) or set(packed)!={'encoding','raw_bytes','sha256','payload'}:
         raise ValueError('Invalid compressed Beta envelope')
     length=packed.get('raw_bytes');digest=packed.get('sha256');payload=packed.get('payload')
     if (packed.get('encoding')!=BETA_PACKED_ENCODING or type(length) is not int
-            or not 0<length<=BETA_LOGICAL_MAX_BYTES
+            or not 0<length<=logical_limit
             or not isinstance(digest,str) or not re.fullmatch('[a-f0-9]{64}',digest)
             or not isinstance(payload,str) or not 0<len(payload)<=SNAPSHOT_BUDGET):
         raise ValueError('Invalid compressed Beta limits')
@@ -351,14 +353,41 @@ def _beta_unpacked(packed):
     return decoded
 
 
+def _beta_packed(beta):
+    return _packed_document(beta,BETA_LOGICAL_MAX_BYTES)
+
+
+def _beta_unpacked(packed):
+    return _unpacked_document(packed,BETA_LOGICAL_MAX_BYTES)
+
+
+def _snapshot_packed(snapshot):
+    return _packed_document(snapshot,SNAPSHOT_LOGICAL_MAX_BYTES)
+
+
+def _snapshot_unpacked(raw):
+    """Require one complete logical snapshot and identical SQL-visible headers."""
+    if set(raw)!=set(SNAPSHOT_HEADERS)|{'snapshot_compressed'}:
+        raise ValueError('Ambiguous compressed snapshot envelope')
+    decoded=_unpacked_document(raw['snapshot_compressed'],SNAPSHOT_LOGICAL_MAX_BYTES)
+    if 'snapshot_compressed' in decoded or decoded.get('beta_compressed') is not None:
+        raise ValueError('Nested compressed snapshot')
+    for key in SNAPSHOT_HEADERS:
+        if key not in decoded or json.dumps(raw[key],sort_keys=True,allow_nan=False)!=json.dumps(decoded[key],sort_keys=True,allow_nan=False):
+            raise ValueError('Compressed snapshot header mismatch')
+    return decoded
+
+
 def sanitize_snapshot(raw, *, wire=True):
-    """Allowlist a snapshot, optionally decoding its lossless Beta wire payload.
+    """Allowlist a snapshot, decoding lossless Beta or complete wire payloads.
 
     Uploader/RPC writes use the default bounded wire form. Dashboard reads use
     wire=False only after the received envelope has passed the network byte cap.
     """
     if not isinstance(raw,dict) or raw.get('schema')!=1 or raw.get('paper') is not True:
         raise ValueError('Invalid paper report format')
+    if 'snapshot_compressed' in raw:
+        raw=_snapshot_unpacked(raw)
     reports=raw.get('reports')
     if not isinstance(reports,dict): raise ValueError('Missing reports')
     from overnight_schema import telemetry
@@ -385,9 +414,21 @@ def sanitize_snapshot(raw, *, wire=True):
     out['control_status']=sanitize_controller(raw.get('control_status'))
     # Keep all positions, orders and research. Compression changes only how the
     # document travels through the existing SQL mailbox, never its logical data.
-    if wire and len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET and out['beta'] is not None:
-        out['beta_compressed']=_beta_packed(out['beta'])
-        out['beta']=None
+    if wire and len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET:
+        logical=out
+        if out['beta'] is not None:
+            out={**out,'beta_compressed':_beta_packed(out['beta']),'beta':None}
+        if len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET:
+            # QQQ trade context repeats across teams. Compress the complete
+            # sanitized report before giving up on Beta; keep the SQL-required
+            # headers and uploader acknowledgements available in plain JSON.
+            try:
+                packed={key:logical[key] for key in SNAPSHOT_HEADERS}
+                packed['snapshot_compressed']=_snapshot_packed(logical)
+                if len(json.dumps(packed,ensure_ascii=False,allow_nan=False).encode('utf-8'))<=SNAPSHOT_BUDGET:
+                    return packed
+            except ValueError:
+                pass  # Preserve the existing bounded failure path below.
     if wire and len(json.dumps(out,ensure_ascii=False,allow_nan=False).encode('utf-8'))>SNAPSHOT_BUDGET and out['beta_compressed'] is not None:
         out['beta_compressed']=None
         out['beta_error']='BETA_TOO_LARGE'
@@ -547,8 +588,8 @@ def sanitize_supervisor(raw):
     # Only research text and date, never balances, secrets or raw state.
     out={'date':str(raw.get('date',''))[:10],'generated_at':stamp(raw.get('generated_at')),
          'summary':str(raw.get('summary',''))[:1000],'mode':str(raw.get('mode',''))[:40],
-         'ai_status':str(raw.get('ai',{}).get('status','NOT_REQUESTED'))[:40],
-         'ai_text':str(raw.get('ai',{}).get('text',''))[:8000]}
+         'ai_status':str(mapping(raw.get('ai')).get('status',raw.get('ai_status','NOT_REQUESTED')))[:40],
+         'ai_text':str(mapping(raw.get('ai')).get('text',raw.get('ai_text','')))[:8000]}
     out['recommendations']=[{k:str(r.get(k,''))[:1200] for k in ('team','trade_id','observation','recommendation')}
         for r in raw.get('recommendations',[])[:100] if isinstance(r,dict)]
     return out
