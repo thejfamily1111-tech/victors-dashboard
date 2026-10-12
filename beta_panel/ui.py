@@ -14,6 +14,7 @@ from .views import (
     money,
     number,
     position_rows,
+    persistent_tabs,
     premium,
     rank_dossiers,
     research_progress,
@@ -146,7 +147,7 @@ def render_dossier(thesis: dict[str, Any], positions: list[dict[str, Any]], even
     check = entry_check if entry_check and entry_check.get('thesis_id') == thesis.get('id') else {}
     if check.get('reason'):
         st.info('Latest entry check: ' + check['reason'])
-    views = st.tabs(["Decision & contract", "Company financials", "Sources & opposing case", "Review history", "Score & company events"])
+    views = persistent_tabs(["Decision & contract", "Company financials", "Sources & opposing case", "Review history", "Score & company events"], key='vt_beta_dossier_tab')
     with views[4]:
         render_scorecard(check.get('scorecard') or research, research)
     with views[0]:
@@ -328,7 +329,7 @@ def render(snapshot: dict) -> None:
         st.warning("At least one position is quarantined pending reconciliation. Its slot remains occupied.")
     render_runtime(snapshot.get('runtime') or {}, scan)
 
-    tabs = st.tabs(["Overview", "Research", "Positions", "Activity"])
+    tabs = persistent_tabs(["Overview", "Research", "Positions", "Activity"], key='vt_beta_tab')
     with tabs[0]:
         with st.expander("Portfolio mandate"):
             st.write("Paper only · 10 stocks maximum · One purchased call or put per stock · $2,000 maximum premium per contract · $20,000 total entry premium")

@@ -174,7 +174,8 @@ def events_panel(d,vic,now,today_only=False):
         else:st.info('No matching events supplied. Check calendar coverage; this does not confirm an event-free session.')
     if today_only:table(windows['Today'])
     else:
-        tabs=st.tabs(list(windows))
+        from beta_panel.views import persistent_tabs
+        tabs=persistent_tabs(list(windows),key='vt_calendar_tab')
         for tab,events in zip(tabs,windows.values()):
             with tab:table(events)
     for message in vic.get('calendar_errors',[]):st.warning(message)
@@ -334,7 +335,8 @@ def render(d,auto):
         from operations_panel import load_context, render_connection, render_controls
         context=load_context(d)
         render_connection(context)
-        qqq_section,beta_section=st.tabs(['QQQ Terminal','Beta Research'])
+        from beta_panel.views import persistent_tabs
+        qqq_section,beta_section=persistent_tabs(['QQQ Terminal','Beta Research'],key='vt_terminal_tab')
         with beta_section:
             render_controls(context,scope='beta')
             from beta_panel.integration import render_beta
@@ -353,7 +355,7 @@ def render(d,auto):
                 if reconciliation.get('status')=='ATTENTION_ENTRIES_PAUSED':st.warning('New entries paused for reconciliation; the engine continues checking known positions. Review the local engine for details.')
             overnight,overnight_error,_=d.load_status('overnight')
             if error:st.warning(error)
-            overview,teamtab,news,research=st.tabs(['Overview','Teams & activity','News & events','QQQ research'])
+            overview,teamtab,news,research=persistent_tabs(['Overview','Teams & activity','News & events','QQQ research'],key='vt_qqq_tab')
             with overview:
                 c1,c2,c3=st.columns([3,1,1])
                 symbol=c1.text_input('Stock / ETF symbol',value='QQQ',key='analysis_ticker').strip().upper()

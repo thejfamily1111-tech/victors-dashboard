@@ -11,6 +11,27 @@ from urllib.parse import urlparse
 ACTIVE_STATES = {"reserved", "opening", "open", "closing", "quarantine"}
 
 
+def persistent_tabs(labels: list[str], *, key: str):
+    """Keep navigation through timed/full reruns and browser refreshes.
+
+    Only fixed tab labels go in the URL; authentication and trading controls
+    remain independent. Keep all tab bodies rendered to preserve their widgets.
+    Requires the stateful native tabs available in the declared Streamlit range.
+    """
+    import streamlit as st
+
+    if key not in st.session_state or st.session_state[key] not in labels:
+        saved = st.query_params.get(key)
+        st.session_state[key] = saved if saved in labels else labels[0]
+
+    def remember():
+        value = st.session_state.get(key)
+        if value in labels:
+            st.query_params[key] = value
+
+    return st.tabs(labels, key=key, on_change=remember)
+
+
 def number(value: Any) -> float | None:
     try:
         parsed = float(value)
