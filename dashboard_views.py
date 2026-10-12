@@ -269,7 +269,11 @@ def render(d,auto):
         teams=sanitize_teams(raw)
         overnight,overnight_error,_=d.load_status('overnight')
         if error:st.warning(error)
-        overview,teamtab,news,research=st.tabs(['Overview','Teams & activity','News & events','Research'])
+        overview,teamtab,news,research,beta=st.tabs(['Overview','Teams & activity','News & events','Research','Beta Research'])
+        with beta:
+            from beta_panel.integration import render_beta
+            render_beta(d)
+
         with overview:
             c1,c2,c3=st.columns([3,1,1])
             symbol=c1.text_input('Stock / ETF symbol',value='QQQ',key='analysis_ticker').strip().upper()
@@ -372,4 +376,5 @@ def overnight_panel(d,raw,now,details=False):
     if b.get('economic_releases'):st.dataframe(b['economic_releases'],hide_index=True,width='stretch')
     for warning in b.get('warnings',[]):st.caption(warning)
     st.caption('Frozen forecast ID: '+str(b.get('forecast_id'))+' · both morning briefings are included in the daily PDF.')
+
 
