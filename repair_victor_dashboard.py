@@ -85,12 +85,105 @@ def repair(target):
     return backup
 
 
+"""Read-only QQQ report diagnostics. Never import project code or call providers."""
+import argparse
+from datetime import datetime, timezone
+import fcntl
+import json
+from pathlib import Path
+import subprocess
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo
+
+
+def timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return parsed.astimezone(timezone.utc).isoformat() if parsed.tzinfo is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def report(path):
+    result = {'exists': path.is_file()}
+    if not result['exists']:
+        return result
+    try:
+        result['file_modified_utc'] = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        if path.stat().st_size > 25_000_000:
+            result['error'] = 'report_too_large_for_diagnostic'
+            return result
+        raw = json.loads(path.read_bytes())
+        if not isinstance(raw, dict):
+            result['error'] = 'report_is_not_an_object'
+            return result
+        result['paper_flag'] = raw.get('paper') is True
+        result['heartbeat'] = timestamp(raw.get('heartbeat'))
+        if path.name == 'teams_telemetry.json':
+            teams = raw.get('teams')
+            result['teams_field_is_list'] = isinstance(teams, list)
+            rows = [row for row in teams if isinstance(row, dict)] if isinstance(teams, list) else []
+            result['team_rows'] = len(rows)
+            result['paper_team_rows'] = sum(row.get('paper') is True for row in rows)
+            times = [timestamp(row.get('heartbeat')) for row in rows]
+            result['latest_team_heartbeat'] = max((value for value in times if value), default=None)
+            result['dated_today_et_rows'] = sum(row.get('day') == datetime.now(ZoneInfo('America/New_York')).date().isoformat() for row in rows)
+    except (OSError, ValueError, TypeError) as exc:
+        result['error'] = type(exc).__name__
+    return result
+
+
+def process_ids(pattern):
+    try:
+        result = subprocess.run(['pgrep', '-f', pattern], capture_output=True, text=True, timeout=5)
+        if result.returncode not in (0, 1):
+            return {'error': 'process_lookup_unavailable'}
+        return [int(value) for value in result.stdout.split() if value.isdigit()]
+    except (OSError, subprocess.TimeoutExpired):
+        return {'error': 'process_lookup_unavailable'}
+
+
+def uploader_lock(path):
+    if not path.is_file():
+        return 'lock_file_missing'
+    try:
+        with path.open('r') as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 'held_by_a_process'
+            fcntl.flock(stream, fcntl.LOCK_UN)
+            return 'not_held'
+    except OSError:
+        return 'unavailable'
+
+
+def diagnose(target):
+    target = Path(target).expanduser().resolve()
+    return {
+        'checked_utc': datetime.now(timezone.utc).isoformat(),
+        'project_folder_exists': target.is_dir(),
+        'teams_report': report(target / 'teams_telemetry.json'),
+        'vic_report': report(target / 'vic_telemetry.json'),
+        'qqq_uploader_config_file_present': (target / '.telemetry_private' / 'uploader.env').is_file(),
+        'qqq_uploader_lock': uploader_lock(target / '.telemetry_sync.lock'),
+        'process_pids': {
+            'paper_runner': process_ids('run_paper[.]py'),
+            'qqq_uploader': process_ids('sync_telemetry[.]py'),
+            'streamlit_dashboards': process_ids('streamlit.*dashboard[.]py'),
+        },
+        'limits': 'Process matches can belong to another folder. Fresh local reports do not prove website receipt. No config contents, account data, provider requests, or orders are exposed or performed.'
+    }
+
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', type=Path, default=Path.home() / 'Desktop' / 'Coding')
     args = parser.parse_args()
     try:
         repair(args.target)
+        print(json.dumps(diagnose(args.target), indent=2))
     except (OSError, ValueError, KeyError, TypeError, SyntaxError) as exc:
         print('Repair stopped:', str(exc))
         raise SystemExit(1)
