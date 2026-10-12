@@ -83,6 +83,38 @@ def rank_dossiers(dossiers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(dossiers, key=lambda item: (-(number((item.get('research_scorecard') or {}).get('research_points')) or 0), str(item.get("symbol", ""))))
 
 
+def research_progress(scan: dict, dossiers: list[dict]) -> dict | None:
+    """Describe the saved finished round without equating attempts with success."""
+    if scan.get('round_complete') is not True:
+        return None
+    fields = ('finalists_attempted', 'finalists_analyzed', 'finalists_pending')
+    if not all(isinstance(scan.get(key), list) for key in fields):
+        return None  # Older snapshots do not establish the finalist outcomes.
+    attempted, analyzed, pending = ({s for s in scan[key] if isinstance(s, str)} for key in fields)
+    finalists = attempted | analyzed | pending
+    if not finalists or analyzed & pending:
+        return None
+    rows = {row.get('symbol'): row for row in dossiers}
+    counts = {'AI analysis errors': 0, 'Missing data or context': 0,
+              'Unsuitable option metadata': 0, 'Other pending research': 0}
+    for symbol in pending:
+        row = rows.get(symbol, {})
+        # A held-position review can replace a dossier after the round ended.
+        try:
+            start, end, observed = (datetime.fromisoformat(value.replace('Z', '+00:00')) for value in
+                                    (scan['round_started_at'], scan['completed_at'], row['as_of']))
+            current = all(value.tzinfo is not None for value in (start, end, observed)) and start <= observed <= end
+        except (KeyError, ValueError, TypeError, AttributeError):
+            current = False
+        stage = row.get('failure_stage') if current else None
+        category = ('AI analysis errors' if stage == 'ai_analysis'
+                    else 'Unsuitable option metadata' if stage == 'option_metadata'
+                    else 'Missing data or context' if current and row.get('research_status') == 'insufficient'
+                    else 'Other pending research')
+        counts[category] += 1
+    return {'total': len(finalists), 'completed': len(analyzed), 'pending': len(pending), 'counts': counts}
+
+
 def position_rows(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {

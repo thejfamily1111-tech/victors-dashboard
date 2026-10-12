@@ -16,6 +16,7 @@ from .views import (
     position_rows,
     premium,
     rank_dossiers,
+    research_progress,
     safe_url,
     timestamp,
 )
@@ -278,6 +279,17 @@ def render(snapshot: dict) -> None:
     positions, orders, events = (snapshot[k] for k in ('positions', 'orders', 'events'))
     status, scan, compatibility, sec_health = (snapshot[k] for k in ('status', 'scan', 'compatibility', 'sec_health'))
     dossiers = rank_dossiers(snapshot['dossiers'])
+    progress = research_progress(scan, dossiers)
+    if progress:
+        message = (f"Screening complete · AI research completed: {progress['completed']}/{progress['total']}"
+                   f" · Unresolved: {progress['pending']}")
+        if progress['pending']:
+            st.warning(message)
+            st.caption(' · '.join(f'{name}: {count}' for name, count in progress['counts'].items() if count))
+        else:
+            st.info(message)
+        if progress['completed'] == 0:
+            st.caption('No finalist completed AI research in this round. Research errors do not qualify a company for entry.')
     validations = snapshot['validations']
     entry_checks = {row.get('thesis_id'): row for row in snapshot['entry_checks']}
     st.markdown("""<style>
