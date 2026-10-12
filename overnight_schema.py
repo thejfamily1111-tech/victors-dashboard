@@ -73,7 +73,7 @@ def telemetry(raw):
         'control_receipt':sanitize_control_receipt(raw.get('control_receipt')),
         'worker':{'instance_id':identity if isinstance(identity,str) and re.fullmatch(r'[a-f0-9]{32}',identity) else None,
             'started_at':stamp(worker.get('started_at')),
-            'release':'Victor_Paper_v1.7.1' if worker.get('release')=='Victor_Paper_v1.7.1' else None},
+            'release':worker.get('release') if worker.get('release') in {'Victor_Paper_v1.7.1','Victor_Paper_v1.7.2'} else None},
         'ai_configuration':compact_configuration(raw.get('ai_configuration')),
         'ai_last_success_at':stamp(raw.get('ai_last_success_at')),
         'session_date':clean_text(raw.get('session_date'),10),'worker_status':clean_text(raw.get('worker_status'),50),

@@ -219,7 +219,7 @@ def sanitize_cluster(value):
 
 def sanitize_engine_status(raw):
     raw=mapping(raw)
-    if raw.get('release') not in {'Victor_Paper_v1.5.0','Victor_Paper_v1.7.0','Victor_Paper_v1.7.1'}:return {}
+    if raw.get('release') not in {'Victor_Paper_v1.5.0','Victor_Paper_v1.7.0','Victor_Paper_v1.7.1','Victor_Paper_v1.7.2'}:return {}
     reconciliation=mapping(raw.get('reconciliation'))
     # Never transfer raw broker error strings or account/funding dictionaries.
     issues=reconciliation.get('issues')
@@ -249,13 +249,13 @@ def sanitize_control_receipt(raw):
          'device_id':device if isinstance(device,str) and re.fullmatch('[a-f0-9]{32}',device) else None,
          'controls':{key:controls[key] for key in CONTROL_KEYS if type(controls.get(key)) is bool},
          'observed_at':stamp(raw.get('observed_at')), 'valid':raw.get('valid') is True,
-         'error':enum(raw.get('error'),{'CONTROLS_UNAVAILABLE','CONTROLS_INVALID'}),
+         'error':enum(raw.get('error'),{'CONTROLS_UNAVAILABLE','CONTROLS_INVALID','CONTROL_LEASE_EXPIRED'}),
          'components':{key:enum(value,COMPONENT_STATES) or 'UNKNOWN' for key,value in mapping(raw.get('components')).items() if key in COMPONENT_KEYS},
          'in_flight':[key for key in raw.get('in_flight',[]) if isinstance(key,str) and key in COMPONENT_KEYS] if isinstance(raw.get('in_flight'),list) else []}
     if 'effective_new_entries_enabled' in raw:
         out['effective_new_entries_enabled']=raw.get('effective_new_entries_enabled') is True
     if 'pause_reason' in raw:
-        out['pause_reason']=enum(raw.get('pause_reason'),{'CONTROLS_UNAVAILABLE','CONTROLS_INVALID','QQQ_TRADING_OFF','VIC_OFF_NEW_ENTRIES_PAUSED'})
+        out['pause_reason']=enum(raw.get('pause_reason'),{'CONTROLS_UNAVAILABLE','CONTROLS_INVALID','CONTROL_LEASE_EXPIRED','QQQ_TRADING_OFF','VIC_OFF_NEW_ENTRIES_PAUSED'})
     return out
 
 
