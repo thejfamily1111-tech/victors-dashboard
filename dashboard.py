@@ -94,9 +94,23 @@ def setting(name, default=''):
 
 
 @st.cache_data(ttl=15,show_spinner=False)
-def remote_report():
+def _fetch_remote_report(url, key, token):
     from telemetry_link import fetch_remote
-    return fetch_remote(setting('TELEMETRY_URL'),setting('TELEMETRY_PUBLISHABLE_KEY'),setting('TELEMETRY_READ_TOKEN'))
+    try:
+        return fetch_remote(url, key, token)
+    except Exception:
+        # Cache failures for the same short polling interval too, so each panel
+        # does not independently retry a failing provider during one refresh.
+        return None
+
+
+def remote_report():
+    from hashlib import sha256
+    from report_continuity import retain_report
+    credentials = tuple(setting(key) for key in ('TELEMETRY_URL', 'TELEMETRY_PUBLISHABLE_KEY', 'TELEMETRY_READ_TOKEN'))
+    source = sha256(json.dumps(credentials).encode()).hexdigest()
+    state = st.session_state.setdefault('_telemetry_display', {})
+    return retain_report(state, source, lambda: _fetch_remote_report(*credentials))
 
 
 def load_status(name):
@@ -106,7 +120,7 @@ def load_status(name):
             if not envelope:return None,'No private telemetry received yet.','Supabase'
             snapshot=envelope['snapshot']
             value={**(snapshot.get('engine_status') or {}),'paper':True,'heartbeat':snapshot.get('observed_at'),'teams':snapshot.get('teams',[])} if name=='teams' else snapshot.get(name) if name in ('supervisor','vic','overnight') else snapshot['reports'].get(name)
-            return value,None,'Supabase'
+            return value,st.session_state.get('_telemetry_display', {}).get('warning'),'Supabase'
         except Exception as exc:return None,f'Private telemetry unavailable ({type(exc).__name__}).','Supabase'
     paths = [BASE / f'{name}_telemetry.json']
     if name == 'hero':

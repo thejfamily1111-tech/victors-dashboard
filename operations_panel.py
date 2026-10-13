@@ -129,9 +129,44 @@ def request_change(context, key, enabled):
         st.session_state['control_feedback'] = ('error', _safe_error(exc))
 
 
+def request_all(context, enabled):
+    """One revision and one atomic request for all five existing controls."""
+    states = [control_state(context.get('envelope'), key) for key in CONTROLS]
+    if (not context.get('client') or any(s['requested'] is None for s in states)
+            or (enabled and not all(s['online'] for s in states))):
+        st.session_state['control_feedback'] = ('error', 'All-services change unavailable. No change was sent.')
+        return
+    try:
+        context['client'].request_controls({key: enabled for key in CONTROLS},
+            expected_revision=states[0]['revision'], request_id=str(uuid4()))
+        st.session_state['control_feedback'] = ('info', 'All services '+('ON' if enabled else 'OFF')+
+            ' requested together. Waiting for each Mac service to acknowledge. Open positions remain managed.')
+    except Exception as exc:
+        st.session_state['control_feedback'] = ('error', _safe_error(exc))
+
+
+def render_master_control(context):
+    states = [control_state(context.get('envelope'), key) for key in CONTROLS]
+    ready = context.get('client') is not None and all(s['requested'] is not None for s in states)
+    all_on = ready and all(s['requested'] is True for s in states)
+    all_off = ready and all(s['requested'] is False for s in states)
+    enabled = not all_on
+    # A mixed selection goes OFF first; the next click enables everything.
+    if ready and not all_on and not all_off:
+        enabled = False
+    st.button('ALL SERVICES · '+('ON' if enabled else 'OFF'), key='control_all_services',
+        disabled=not ready or (enabled and not all(s['online'] for s in states)),
+        on_click=request_all, args=(context, enabled))
+    confirmed = ready and all(s['acknowledged'] for s in states)
+    label = 'ON' if all_on else 'OFF' if all_off else 'MIXED' if ready else 'UNAVAILABLE'
+    st.caption('All services: '+label+(' · acknowledged' if confirmed else ' · unconfirmed / pending')+
+               ' · QQQ trading, QQQ research, overnight research, VIC and Beta. OFF keeps open positions managed.')
+
+
 def render_connection(context):
     st.markdown('### Control center')
     st.caption('One dashboard for QQQ and Beta Research · Paper only')
+    render_master_control(context)
     if context.get('error'):
         st.warning(context['error'])
     applied = (context.get('envelope') or {}).get('applied') or {}

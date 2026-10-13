@@ -13,6 +13,9 @@ def render_beta(d):
     try:
         if mode == 'remote':
             envelope = d.remote_report() or {}
+            warning = st.session_state.get('_telemetry_display', {}).get('warning')
+            if warning:
+                st.warning(warning)
             combined = envelope.get('snapshot') or {}
             snapshot = combined.get('beta')
             source = 'Private Mac telemetry'
