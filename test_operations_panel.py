@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from operations_panel import control_state, CONTROLS, load_context
+from operations_panel import control_state, group_state, request_group, CONTROLS, VIC_KEYS, load_context
 
 
 NOW = datetime(2026, 10, 12, 15, 0, tzinfo=timezone.utc)
@@ -86,10 +86,13 @@ render_controls(context,'beta')
 '''
         at = AppTest.from_string(script).run(timeout=20)
         self.assertEqual(len(at.exception), 0)
-        self.assertEqual(len(at.button), 11)
+        self.assertEqual(len(at.button), 5)
+        self.assertEqual({b.key for b in at.button}, {'control_all_services', 'control_on_vic', 'control_off_vic', 'control_on_beta_engine_enabled', 'control_off_beta_engine_enabled'})
         at.button(key='control_all_services').click().run()
         self.assertEqual(at.session_state['sent']['changes'], {key: True for key in CONTROLS})
         self.assertEqual(at.session_state['sent']['expected_revision'], 4)
+        at.button(key='control_on_vic').click().run()
+        self.assertEqual(at.session_state['sent']['changes'], {key: True for key in VIC_KEYS})
         at.button(key='control_on_beta_engine_enabled').click().run()
         self.assertEqual(len(at.exception), 0)
         self.assertEqual(at.session_state['sent']['changes'], {'beta_engine_enabled': True})
@@ -107,8 +110,62 @@ render_controls(context,'qqq')
 '''
         at = AppTest.from_string(script).run(timeout=15)
         self.assertEqual(len(at.exception), 0)
-        self.assertTrue(at.button(key='control_on_qqq_trading_enabled').disabled)
-        self.assertFalse(at.button(key='control_off_qqq_trading_enabled').disabled)
+        self.assertTrue(at.button(key='control_on_vic').disabled)
+        self.assertFalse(at.button(key='control_off_vic').disabled)
+
+
+class GroupStateTests(unittest.TestCase):
+    def test_vic_waits_for_every_child_and_keeps_beta_independent(self):
+        for service in ('qqq','overnight','vic'):
+            raw=envelope()
+            raw['applied']['services'][service]['control_revision']=3
+            self.assertEqual(group_state(raw,'vic',NOW)['label'],'CHANGE PENDING')
+            self.assertEqual(group_state(raw,'beta',NOW)['label'],'ON · RUNNING')
+        raw=envelope()
+        raw['applied']['controls']['beta_engine_enabled']=False
+        self.assertEqual(group_state(raw,'vic',NOW)['label'],'ON · RUNNING')
+        self.assertEqual(group_state(raw,'master',NOW)['label'],'CHANGE PENDING')
+
+    def test_stale_heartbeat_and_error_never_become_running(self):
+        for service in ('qqq','overnight','vic'):
+            raw=envelope()
+            raw['applied']['services'][service]['heartbeat_at']=(NOW-timedelta(minutes=3)).isoformat()
+            self.assertEqual(group_state(raw,'vic',NOW)['label'],'ON · WAITING FOR SERVICE')
+            raw['applied']['services'][service]['state']='ERROR'
+            self.assertEqual(group_state(raw,'vic',NOW)['label'],'NEEDS ATTENTION')
+        raw=envelope()
+        raw['applied']['observed_at']=(NOW-timedelta(minutes=3)).isoformat()
+        self.assertEqual(group_state(raw,'vic',NOW)['label'],'MAC OFFLINE / UNCONFIRMED')
+
+    def test_mixed_is_never_on_and_off_preserves_monitoring(self):
+        raw=envelope()
+        for section in ('desired','applied'):raw[section]['controls']['vic_enabled']=False
+        state=group_state(raw,'vic',NOW)
+        self.assertTrue(state['mixed'])
+        self.assertEqual(state['label'],'MIXED')
+        self.assertEqual(group_state(envelope(False),'vic',NOW)['label'],'OFF · POSITION MONITORING')
+
+    def test_callback_rechecks_stale_on_but_sends_atomic_off(self):
+        from unittest.mock import Mock
+        raw=envelope()
+        client=Mock()
+        context={'client':client,'envelope':raw}
+        with patch('operations_panel.st.session_state',{}):
+            request_group(context,'vic',True)
+            client.request_controls.assert_not_called()
+            request_group(context,'vic',False)
+            self.assertEqual(client.request_controls.call_args.args,({key:False for key in VIC_KEYS},))
+            self.assertEqual(client.request_controls.call_args.kwargs['expected_revision'],4)
+
+    def test_boolean_revision_is_not_an_acknowledgement(self):
+        raw=envelope()
+        raw['desired']['revision']=1
+        raw['applied']['revision']=True
+        for service in raw['applied']['services'].values():service['control_revision']=1
+        self.assertEqual(group_state(raw,'vic',NOW)['label'],'CHANGE PENDING')
+        raw['applied']['revision']=1
+        raw['applied']['services']['qqq']['control_revision']=True
+        self.assertEqual(group_state(raw,'vic',NOW)['label'],'CHANGE PENDING')
 
 
 if __name__ == '__main__':

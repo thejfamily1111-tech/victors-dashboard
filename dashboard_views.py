@@ -191,16 +191,18 @@ def teams_panel(d,teams,source,now,summary_only=False):
             if (num(p.get('remaining_qty')) or 0)>0 and not fresh(p.get('quote_at'),now,30):
                 p['unrealized_pnl']=None;t['unrealized_pnl']=None
     totals=team_totals(displayteams,now.date())
-    active_ids=tuple(getattr(team_settings,'ACTIVE_TEAM_IDS',NAMES))
+    names={**NAMES,'vic':'VIC'}
+    entry_labels={**ENTRY_LABELS,'vic':'VIC scans stock options and selects a setup using current market and research evidence. Recorded trades retain their entry-time strategy and reasons.'}
+    active_ids=('vic',)
     visible_ids=visible_team_ids(displayteams,active_ids)
     legacy_ids=[team for team in visible_ids if team not in active_ids]
-    st.subheader('Paper teams · '+now.strftime('%b %d')+' ET')
-    st.caption(f'{len(active_ids)} configured entry teams · roster '+str(getattr(team_settings,'ROSTER_VERSION','legacy'))+'. Historical owner records are retained.')
+    st.subheader('VIC Activity · '+now.strftime('%b %d')+' ET')
+    st.caption('One VIC engine · $10,000 daily budget · ATM or slightly out-of-the-money stock options · 7–14-day expirations. Historical records are retained.')
     if legacy_ids:
-        st.warning('Inactive teams still have open positions or unresolved orders: '+', '.join(legacy_ids)+'. They remain visible for exit and order management; new entries are disabled.')
+        st.warning('Archived owners still have open positions or unresolved orders: '+', '.join(legacy_ids)+'. Their reported positions and orders remain visible. Check entry permissions below.')
     if totals:
         stale=any(not fresh(t.get('heartbeat'),now) for t in teams if t.get('day')==str(now.date()))
-        if stale:st.warning('Stale team reports: the displayed totals are the last reported values, not confirmed current activity.')
+        if stale:st.warning('Stale activity reports: the displayed totals are the last reported values, not confirmed current activity.')
         cols=st.columns(5)
         labels=[('Active positions',str(totals['positions']) if totals['positions'] is not None else 'Unconfirmed',str(totals['contracts'])+' contracts'),
             ('Active balance · premium',d.money(totals['premium']),'Remaining filled contracts at entry cost'),
@@ -211,30 +213,34 @@ def teams_panel(d,teams,source,now,summary_only=False):
             with col:d.card(label,value,note)
         st.caption(f"{totals['teams']} reporting owner records, including legacy history · closed trades {totals['closed_trades']} · wins {totals['wins']} · losses {totals['losses']} · all realized exits (including partials) {d.money(totals['realized'])} gross. Totals retain every reported owner's cash flow. Virtual allowances are not broker equity or buying power.")
         if totals['pending']:st.info('An entry remainder is still pending. Filled contracts are managed; aggregate balances remain conservative until the order is resolved.')
-    else:st.info('No team reports dated today. Historical reports are available in team details.')
+    else:st.info('No VIC activity report dated today. Historical reports remain available below.')
     if summary_only:
         scanning=sum(t.get('team_id') in active_ids and t.get('entry_enabled') is not False and t.get('health')=='SCANNING' and fresh(t.get('heartbeat'),now) and t.get('day')==str(now.date()) for t in teams)
-        st.caption(f'{scanning} teams reporting SCANNING · {len(teams)} connected roster records · '+str(source or 'not connected'))
+        st.caption(('VIC is scanning' if scanning else 'VIC scanning is unconfirmed')+' · '+str(source or 'not connected'))
         return
     lookup={t['team_id']:t for t in displayteams}
     def select_team(teamid):st.session_state.team_detail=teamid
-    archived=[team for team in NAMES if team not in visible_ids and team in lookup]
-    show_history=st.checkbox('Show inactive team history',value=False,key='show_inactive_team_history') if archived else False
+    archived=[team for team in names if team not in visible_ids and team in lookup]
+    show_history=st.checkbox('Show archived activity',value=False,key='show_inactive_team_history') if archived else False
     detail_ids=visible_ids+archived if show_history else visible_ids
     if st.session_state.get('team_detail') not in detail_ids:st.session_state.team_detail=detail_ids[0]
-    selected=st.selectbox('Select a team for strategy, positions and activity',detail_ids,format_func=lambda x:x.replace('team','Team ').replace('report','Report ')+' · '+NAMES[x],key='team_detail')
+    selected=st.selectbox('Select activity',detail_ids,format_func=lambda x:names[x] if x=='vic' else 'Archived · '+x.replace('team','Team ').replace('report','Report ')+' · '+names[x],key='team_detail')
     for start in range(0,len(visible_ids),3):
         ids=visible_ids[start:start+3]
         for col,teamid in zip(st.columns(3),ids):
             with col:
                 t=lookup.get(teamid,{})
-                st.markdown('#### '+teamid.replace('team','Team ').replace('report','Report '))
-                st.caption(NAMES[teamid])
-                if teamid not in active_ids or t.get('entry_enabled') is False:
-                    st.caption('New entries disabled · legacy position and order management only')
+                st.markdown('#### '+('VIC' if teamid=='vic' else 'Archived · '+teamid.replace('team','Team ').replace('report','Report ')))
+                st.caption(names[teamid])
+                if t.get('entry_enabled') is False:
+                    st.caption('New entries disabled · position and order management only')
+                elif teamid not in active_ids:
+                    st.caption('Archived owner · new-entry shutdown has not been confirmed by telemetry')
                 state=t.get('health','UNCONFIRMED') if fresh(t.get('heartbeat'),now) else 'STALE REPORT' if t else 'NO REPORT RECEIVED'
                 active=[p for p in t.get('trades',[]) if (num(p.get('remaining_qty')) or 0)>0]
-                if active and state not in {'STALE REPORT','NO REPORT RECEIVED'}:state += ' · OPEN '+('CALL' if active[0].get('owner')=='HERO' else 'PUT')
+                if active and state not in {'STALE REPORT','NO REPORT RECEIVED'}:
+                    contract_side=re.search(r'\d{6}([CP])\d{8}$',str(active[0].get('symbol','')))
+                    state += ' · OPEN '+('CALL' if contract_side and contract_side[1]=='C' else 'PUT' if contract_side else 'OPTION')
                 st.write(state)
                 if t.get('pending_entry') or (num(t.get('pending_orders')) or 0)>0:
                     st.caption('Unresolved orders remain; entry fills may be partial.')
@@ -242,10 +248,10 @@ def teams_panel(d,teams,source,now,summary_only=False):
                 d.card('Reported realized P/L · gross',d.money(t.get('realized_pnl')),'Open mark '+d.money(t.get('unrealized_pnl')),color(t.get('realized_pnl')))
                 st.button('View strategy & activity',key='view_'+teamid,on_click=select_team,args=(teamid,))
     t=lookup.get(selected,{})
-    st.divider();st.subheader(NAMES[selected]+' · detail')
+    st.divider();st.subheader(names[selected]+' · detail')
     st.caption('Current configured strategy; recorded trades below retain their entry-time rules.')
-    st.write(ENTRY_LABELS[selected])
-    if not t:st.info('No report has reached this dashboard for this team. Check the Mac connection and QQQ service status above; missing telemetry does not confirm that the engine is stopped.');return
+    st.write(entry_labels[selected])
+    if not t:st.info('No report has reached this dashboard for VIC. Check the Mac connection and VIC status above; missing telemetry does not confirm that the engine is stopped.');return
     st.caption('Current configured exit policy: '+t.get('exit_policy','Unavailable')+' Position-specific historical policy may differ.')
     policy=t.get('vic_policy') or {}
     if policy:
@@ -272,7 +278,7 @@ def teams_panel(d,teams,source,now,summary_only=False):
     trades=sorted(t.get('trades',[]),key=lambda p:p.get('closed_at') or p.get('entry_at') or '')
     rows=[]
     for p in trades:
-        match=re.fullmatch(r'QQQ(\d{6})([CP])(\d{8})',p.get('symbol',''))
+        match=re.fullmatch(r'[A-Z][A-Z0-9.]{0,5}(\d{6})([CP])(\d{8})',p.get('symbol',''))
         q=num(p.get('remaining_qty'));entry=num(p.get('entry_price'));u=num(p.get('unrealized_pnl'))
         cost=q*entry*100 if q is not None and entry is not None else None
         rows.append({'Contract':p.get('symbol'),'Expiry':match[1] if match else None,'Side':'CALL' if match and match[2]=='C' else 'PUT' if match else None,
@@ -281,6 +287,7 @@ def teams_panel(d,teams,source,now,summary_only=False):
           'Active premium':cost if q else 0,'Market value':cost+u if q and cost is not None and u is not None else 0 if q==0 else None,
           'Open mark P/L':u,'Realized P/L gross':p.get('realized_pnl'),'Quote ET':d.display_time(p.get('quote_at')),
           'Exit reason':p.get('exit_reason'),'Setup':p.get('setup'),
+          **({'Strategy':p.get('strategy_id'),'Entry reason':p.get('entry_reason')} if selected=='vic' else {}),
           'Recorded strategy version':(p.get('strategy_provenance') or {}).get('strategy_version','Unavailable'),
           'Signal cluster':p.get('signal_cluster')})
     if rows:
@@ -302,7 +309,7 @@ def teams_panel(d,teams,source,now,summary_only=False):
                 st.json(p.get('market_entry',{}));st.dataframe(p.get('exit_fills',[]),hide_index=True,width='stretch')
     else:st.info('No reported trades for this report date.')
     st.markdown('#### Latest decisions and chart observations')
-    st.dataframe([{'Side':owner.upper(),**decision} for owner,decision in t.get('decisions',{}).items()],hide_index=True,width='stretch')
+    st.dataframe([{('Engine' if selected=='vic' else 'Side'):owner.upper(),**decision} for owner,decision in t.get('decisions',{}).items()],hide_index=True,width='stretch')
     st.caption('Chart observation '+d.display_time(t.get('metrics',{}).get('bar_end')))
     st.json(t.get('metrics',{}))
     st.markdown('#### Fill activity · chronological')
@@ -355,7 +362,10 @@ def render(d,auto):
                 if reconciliation.get('status')=='ATTENTION_ENTRIES_PAUSED':st.warning('New entries paused for reconciliation; the engine continues checking known positions. Review the local engine for details.')
             overnight,overnight_error,_=d.load_status('overnight')
             if error:st.warning(error)
-            overview,teamtab,news,research=persistent_tabs(['Overview','Teams & activity','News & events','QQQ research'],key='vt_qqq_tab')
+            # Preserve the selected activity tab across its requested rename.
+            if st.session_state.get('vt_qqq_tab')=='Teams & activity':st.session_state['vt_qqq_tab']='VIC Activity'
+            if st.query_params.get('vt_qqq_tab')=='Teams & activity':st.query_params['vt_qqq_tab']='VIC Activity'
+            overview,teamtab,news,research=persistent_tabs(['Overview','VIC Activity','News & events','QQQ research'],key='vt_qqq_tab')
             with overview:
                 c1,c2,c3=st.columns([3,1,1])
                 symbol=c1.text_input('Stock / ETF symbol',value='QQQ',key='analysis_ticker').strip().upper()
@@ -389,9 +399,6 @@ def render(d,auto):
                 teams_panel(d,teams,source,now,summary_only=True)
             with teamtab:
                 teams_panel(d,teams,source,now)
-                if not teams:
-                    reports={n:d.load_status(n) for n in ('hero','bear')}
-                    d.show_pipeline(reports['hero'][0],reports,now)
             with news:news_panel(d,vic,now)
             with research:
                 overnight_panel(d,overnight,now,details=True)
