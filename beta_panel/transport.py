@@ -3,7 +3,8 @@ import json
 import re
 import ssl
 from urllib import request, error
-from .snapshot import MAX_BYTES, SnapshotError, validate
+from .snapshot import SnapshotError
+from .wire import WIRE_LIMIT as MAX_BYTES, encode, decode
 
 
 class LinkError(ValueError):
@@ -27,7 +28,7 @@ def rpc(url, key, token, *, snapshot=None):
     operation = 'vt_beta_write' if snapshot is not None else 'vt_beta_read'
     body = dict(p_token=token)
     if snapshot is not None:
-        body['p_snapshot'] = validate(snapshot, secrets=(key, token))
+        body['p_snapshot'] = encode(snapshot, secrets=(key, token))
     encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
     if len(encoded) > MAX_BYTES + 1000:
         raise LinkError('Beta report exceeds transport size limit')
@@ -51,7 +52,7 @@ def rpc(url, key, token, *, snapshot=None):
             return None
         if not isinstance(result, dict):
             raise LinkError('Invalid Beta telemetry envelope')
-        return validate(result.get('snapshot'))
+        return decode(result.get('snapshot'))
     except error.HTTPError as exc:
         raise LinkError(f'Beta telemetry returned HTTP {exc.code}. Check the Beta SQL setup and access settings.', exc.code) from None
     except (error.URLError, TimeoutError, OSError, ValueError) as exc:

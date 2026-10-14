@@ -19,6 +19,16 @@ def render_beta(d):
             combined = envelope.get('snapshot') or {}
             snapshot = combined.get('beta')
             source = 'Private Mac telemetry'
+            try:
+                from .transport import rpc as beta_rpc
+                dedicated = beta_rpc(d.setting('TELEMETRY_URL'), d.setting('TELEMETRY_PUBLISHABLE_KEY'),
+                                     d.setting('TELEMETRY_READ_TOKEN'))
+                if dedicated is not None and (snapshot is None or
+                        dedicated['observed_at'] >= snapshot.get('observed_at', '')):
+                    snapshot = dedicated
+            except ValueError:
+                if snapshot is None:
+                    st.warning('Beta report connection unavailable. Last upload could not be retrieved.')
             if snapshot is None:
                 st.subheader('Beta Research')
                 messages = {
@@ -31,7 +41,7 @@ def render_beta(d):
                 else:
                     st.info('Waiting for the Mac’s first Beta report. The service controls above show whether its engine is connected.')
                 return
-            snapshot = validate(snapshot)
+            snapshot = validate(snapshot, enforce_limit=False)
         elif mode == 'local':
             project = d.setting('BETA_RESEARCH_DIR', str(Path(d.BASE).parent / 'Beta Research'))
             snapshot = read_local(project, data_dir=d.setting('BETA_DATA_DIR', '') or None)
