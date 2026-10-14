@@ -57,6 +57,15 @@ def contract(value):
     return value if isinstance(value,str) and re.fullmatch(r'QQQ\d{6}[CP]\d{8}',value) else None
 
 
+def stock_option_contract(value):
+    """Standard OCC symbols for VIC's stock-option universe."""
+    return value if isinstance(value,str) and re.fullmatch(r'[A-Z][A-Z0-9.]{0,5}\d{6}[CP]\d{8}',value) else None
+
+
+def safe_text(value, limit=1000):
+    return value[:limit] if isinstance(value,str) and not any(ord(c)<32 for c in value) else None
+
+
 def records(value):
     if isinstance(value,dict): value=list(value.values())
     return [r for r in value[-100:] if isinstance(r,dict)] if isinstance(value,list) else []
@@ -205,7 +214,8 @@ def sanitize_plan(raw):
 def sanitize_provenance(raw):
     raw=mapping(raw)
     from team_settings import NAMES
-    if raw.get('team_id') not in NAMES or raw.get('strategy_version') not in ('paper-v1.7.0','paper-v1.7.1'):return {}
+    vic = raw.get('team_id') == 'vic' and raw.get('strategy_version') == 'vic-v1.0.0'
+    if not vic and (raw.get('team_id') not in NAMES or raw.get('strategy_version') not in ('paper-v1.7.0','paper-v1.7.1')):return {}
     out={key:raw.get(key) for key in ('strategy_version','team_id')}
     for key in ('roster_version','label','entry_label','exit_label','source_rule'):
         value=raw.get(key)
@@ -227,15 +237,16 @@ def sanitize_cluster(value):
 
 def sanitize_engine_status(raw):
     raw=mapping(raw)
-    if raw.get('release') not in {'Victor_Paper_v1.5.0','Victor_Paper_v1.7.0','Victor_Paper_v1.7.1','Victor_Paper_v1.7.2'}:return {}
+    if raw.get('release') not in {'Victor_Paper_v1.5.0','Victor_Paper_v1.7.0','Victor_Paper_v1.7.1','Victor_Paper_v1.7.2','VIC_Paper_v1.0.0'}:return {}
     reconciliation=mapping(raw.get('reconciliation'))
     # Never transfer raw broker error strings or account/funding dictionaries.
     issues=reconciliation.get('issues')
     count=len(issues) if isinstance(issues,list) else bounded(reconciliation.get('issue_count'),0,1000)
     from team_settings import NAMES
-    return {'release':raw['release'],'active_team_ids':[t for t in raw.get('active_team_ids',[]) if t in NAMES],
+    return {'release':raw['release'],**({'engine_name':'VIC'} if raw['release']=='VIC_Paper_v1.0.0' else {}),
+        'active_team_ids':[t for t in raw.get('active_team_ids',[]) if t in NAMES or t=='vic'],
         'release_manifest_sha256':raw.get('release_manifest_sha256') if isinstance(raw.get('release_manifest_sha256'),str) and re.fullmatch(r'[a-f0-9]{64}',raw['release_manifest_sha256']) else None,
-        'roster_version':enum(raw.get('roster_version'),{'paper10-2026-10-12-v1'}),
+        'roster_version':enum(raw.get('roster_version'),{'paper10-2026-10-12-v1','vic-2026-10-13-v1'}),
         'reconciliation':{'ok':reconciliation.get('ok') if type(reconciliation.get('ok')) is bool else None,
         'checked_at':stamp(reconciliation.get('checked_at')),'issue_count':count,
         'status':'VERIFIED' if reconciliation.get('ok') is True else 'ATTENTION_ENTRIES_PAUSED' if reconciliation.get('ok') is False else 'UNKNOWN'},
@@ -450,16 +461,19 @@ def sanitize_teams(raw):
     if isinstance(raw,dict): raw=raw.get('teams')
     if not isinstance(raw,list): return []
     output=[]
-    from team_settings import NAMES as names, BUDGET, EXIT_LABELS
+    from team_settings import NAMES, BUDGET, EXIT_LABELS
+    names={**NAMES,'vic':'VIC'}
     for t in raw[:len(names)]:
         if not isinstance(t,dict) or t.get('team_id') not in names or t.get('paper') is not True:continue
+        is_vic=t['team_id']=='vic'
+        option_contract=stock_option_contract if is_vic else contract
         team={'team_id':t['team_id'],'label':names[t['team_id']],'paper':True,
               'heartbeat':stamp(t.get('heartbeat')),'health':enum(t.get('health'),HEALTH) or 'UNKNOWN',
               'day':t.get('day') if isinstance(t.get('day'),str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}',t['day']) else None,
-              'starting_equity':numeric(t.get('starting_equity')) or BUDGET,
-              'exit_policy':EXIT_LABELS[t['team_id']],'pending_entry':t.get('pending_entry') is True,'trades':[],'activities':[]}
+              'starting_equity':numeric(t.get('starting_equity')) if is_vic else numeric(t.get('starting_equity')) or BUDGET,
+              'exit_policy':(safe_text(t.get('exit_policy')) or 'Unavailable') if is_vic else EXIT_LABELS[t['team_id']],'pending_entry':t.get('pending_entry') is True,'trades':[],'activities':[]}
         team['entry_enabled']=t.get('entry_enabled') if isinstance(t.get('entry_enabled'),bool) else None
-        team['roster_version']=enum(t.get('roster_version'),{'paper10-2026-10-12-v1'})
+        team['roster_version']=enum(t.get('roster_version'),{'paper10-2026-10-12-v1','vic-2026-10-13-v1'})
         team['pending_orders']=bounded(t.get('pending_orders'),0,1000)
         for key in ('realized_pnl','unrealized_pnl','net_pnl','equity','entry_budget','completed_trades','wins'):
             team[key]=signed(t.get(key))
@@ -473,29 +487,39 @@ def sanitize_teams(raw):
         team['metrics']={'bar_end':stamp(metrics.get('bar_end'))}
         for key in ('candle_minutes','price_close','ema_5_5m','ema_9_5m','momentum_relative_volume','rsi_14_5m','previous_rsi_14_5m','relative_volume','session_vwap','vwap_slope_atr','lower_bband','middle_bband','upper_bband','orb_high','orb_low','directional_efficiency','mean_range_atr','chop_detected'):
             team['metrics'][key]=signed(metrics.get(key))
+        if is_vic:
+            for key in ('universe_count','scanned_count','candidate_count','strategies_evaluated'):
+                team['metrics'][key]=bounded(metrics.get(key),0,1000000)
         team['decisions']={}
         decisions=t.get('decisions') if isinstance(t.get('decisions'),dict) else {}
         def reason(value):
             return value if isinstance(value,str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,79}',value) else 'DATA_CHECK_FAILED'
-        for owner in ('hero','bear'):
+        for owner in (('vic',) if is_vic else ('hero','bear')):
             d=decisions.get(owner)
             if not isinstance(d,dict):continue
             clean={'action':enum(d.get('action'),{'WAIT','BUY_CALL_SIGNAL','BUY_PUT_SIGNAL','HOLD','CLOSE_ALL','SCALE_OUT_50','DATA_UNAVAILABLE'}),
                    'reasons':[reason(r) for r in d.get('reasons',[])[:20]] if isinstance(d.get('reasons'),list) else []}
             if d.get('reason'):clean['reason']=reason(d['reason'])
+            if is_vic:
+                for key in ('strategy_id','entry_reason'):clean[key]=safe_text(d.get(key))
+                clean['symbol']=d.get('symbol') if isinstance(d.get('symbol'),str) and re.fullmatch(r'[A-Z][A-Z0-9.]{0,5}',d['symbol']) else None
+                clean['score']=signed(d.get('score'))
             for key in ('stop_price','target_level','room_r'):clean[key]=signed(d.get(key))
             clean['team13_plan']=sanitize_plan(d.get('team13_plan'))
             clean['team13_plan_observation']=sanitize_plan(d.get('team13_plan_observation'))
             team['decisions'][owner]=clean
         for row in records(t.get('trades'))[-100:]:
-            symbol=contract(row.get('symbol'))
+            symbol=option_contract(row.get('symbol'))
             if not symbol:continue
-            trade={'symbol':symbol,'owner':enum(row.get('owner'),{'HERO','BEAR'}),
+            trade={'symbol':symbol,'owner':enum(row.get('owner'),{'VIC'} if is_vic else {'HERO','BEAR'}),
                    'entry_at':stamp(row.get('entry_at')),'closed_at':stamp(row.get('closed_at')),
                    'quote_at':stamp(row.get('quote_at')),'exit_fills':[],
                    'setup':row.get('setup') if isinstance(row.get('setup'),str) and re.fullmatch(r'[A-Za-z0-9_ /.-]{1,100}',row['setup']) else None,
                    'exit_reason':row.get('exit_reason') if isinstance(row.get('exit_reason'),str) and re.fullmatch(r'[A-Z0-9_]{1,80}',row['exit_reason']) else None,
                    'market_policy_version':enum(row.get('market_policy_version'),{'active-context-v1','vic-day-hold-v1'})}
+            if is_vic:
+                trade['strategy_id']=safe_text(row.get('strategy_id'),120)
+                trade['entry_reason']=safe_text(row.get('entry_reason'),2000)
             trade['team13_plan']=sanitize_plan(row.get('team13_plan'))
             trade['strategy_provenance']=sanitize_provenance(row.get('strategy_provenance'))
             trade['signal_cluster']=sanitize_cluster(row.get('signal_cluster'))
@@ -509,7 +533,7 @@ def sanitize_teams(raw):
             trade['market_entry']['bias']=enum(entry.get('bias'),{'BULLISH','BEARISH','NEUTRAL'})
             trade['market_entry']['at']=stamp(entry.get('at'))
             trade['market_entry']['ranked_at']=stamp(entry.get('ranked_at'))
-            trade['market_entry']['reason']=enum(entry.get('reason'),{'VIC_ALIGNED','VIC_CONFLICT_REDUCED','VIC_NEUTRAL_REDUCED','VIC_INCOMPLETE_CHART_ONLY_REDUCED','TEAM7_FIXED_SINGLE_ALLOCATION','LEGACY_CONTEXT_POLICY'})
+            trade['market_entry']['reason']=enum(entry.get('reason'),{'VIC_ALIGNED','VIC_CONFLICT_REDUCED','VIC_NEUTRAL_REDUCED','VIC_INCOMPLETE_CHART_ONLY_REDUCED','TEAM7_FIXED_SINGLE_ALLOCATION','LEGACY_CONTEXT_POLICY','VIC_STRATEGY_SELECTION'})
             trade['market_entry']['entry_policy_version']=enum(entry.get('entry_policy_version'),POLICY_VERSIONS|{'active-context-v1'})
             for key in ('entry_chart_bar_end','vic_qqq_bar_end'):trade['market_entry'][key]=stamp(entry.get(key))
             trade['market_entry']['stock_feed']=enum(entry.get('stock_feed'),STOCK_FEEDS)
@@ -524,9 +548,9 @@ def sanitize_teams(raw):
             trade['market_entry']['overnight']=compact(entry.get('overnight'))
             team['trades'].append(trade)
         for a in records(t.get('activities'))[-30:]:
-            symbol=contract(a.get('symbol'))
+            symbol=option_contract(a.get('symbol'))
             if symbol and a.get('type') in {'ENTRY_FILLED','EXIT_FILLED'}:
-                team['activities'].append({'symbol':symbol,'owner':enum(a.get('owner'),{'hero','bear'}),
+                team['activities'].append({'symbol':symbol,'owner':enum(a.get('owner'),{'vic','VIC'} if is_vic else {'hero','bear'}),
                     'type':a['type'],'timestamp':stamp(a.get('timestamp')),'qty':numeric(a.get('qty')),
                     'price':numeric(a.get('price')),'realized_pnl':signed(a.get('realized_pnl'))})
         output.append(team)

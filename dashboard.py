@@ -816,8 +816,8 @@ def main():
     with st.sidebar:
         if (BASE/'avatar_logo.png').is_file():st.image(str(BASE/'avatar_logo.png'),width='stretch')
         st.markdown('## VICTOR TERMINAL')
-        st.caption('Paper trading · QQQ · shared VIC context')
-        auto=st.toggle('Auto-refresh · 15 seconds',value=True)
+        st.caption('Paper trading · VIC · Beta Research')
+        auto=st.toggle('Auto-refresh · 1 minute',value=True)
         if st.button('Refresh market data',width='stretch'):
             st.cache_data.clear()
             try:vic_module().CACHE.clear()
@@ -827,7 +827,7 @@ def main():
             st.rerun()
     st.caption('Paper trading · dashboard controls')
     st.title('⚡ Victor Terminal')
-    st.caption('Market overview · paper teams · news & events · research')
+    st.caption('Market overview · VIC activity · news & events · research')
     import sys
     from dashboard_views import render
     render(sys.modules[__name__],auto)
@@ -835,3 +835,4 @@ def main():
 
 if __name__=='__main__':
     main()
+
